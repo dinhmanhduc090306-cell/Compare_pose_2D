@@ -1,0 +1,13 @@
+python main_img.py \
+  --test \
+  --previous_dir checkpoint/2026-05-29_09-39-3827_dsvtformer_0.000200_64_torch_2.4.1+cu124_python_3.11/model_6_3728243.pth \
+  --dataset ap3d \
+  -k cpn \
+  --root_path data/ \
+  --frames 27 \
+  --batch_size 64 \
+  --model dsvtformer \
+  --depth 2 \
+  --embed_dim_ratio 32 \
+  --img_embed_dim_ratio 16 \
+  --gpu 0
