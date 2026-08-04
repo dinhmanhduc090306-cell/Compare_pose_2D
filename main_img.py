@@ -172,6 +172,8 @@ def count_used_parameters_cuda(model, example_input_2d, example_img):
     return used_param_count / 1e6
 
 if __name__ == '__main__':
+    import time
+    start_time = time.time()
 
     root_path = opt.root_path
     opt.manualSeed = 1
@@ -271,3 +273,16 @@ if __name__ == '__main__':
                 lr *= opt.lr_decay
 
     print(opt.checkpoint)
+    end_time = time.time()
+    
+    print("\n" + "="*40)
+    print("Process Completed")
+    print(f"Time Cost: {(end_time - start_time) / 60:.2f} minutes")
+    print("Hardware Info:")
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        print(f"  GPU: {gpu_name} ({gpu_memory:.2f} GB)")
+    else:
+        print("  GPU: Not available (running on CPU)")
+    print("="*40)

@@ -97,6 +97,7 @@ def mpjpe_by_action_p1(predicted, target, action, action_error_sum, valid_mask=N
     assert predicted.shape == target.shape
     num = predicted.size(0)
     dist = torch.mean(torch.norm(predicted - target, dim=len(target.shape) - 1), dim=len(target.shape) - 2)
+    dist_joints = torch.mean(torch.norm(predicted - target, dim=len(target.shape) - 1), dim=len(target.shape) - 3)
 
     def resolve_name(act_name):
         # 1. Try space-based splitting (H3.6M style)
@@ -121,15 +122,19 @@ def mpjpe_by_action_p1(predicted, target, action, action_error_sum, valid_mask=N
             valid_num = sum(valid_mask)
             if valid_num > 0:
                 dist_masked = dist[valid_mask]
+                dist_joints_masked = dist_joints[valid_mask]
                 action_error_sum[action_name]['p1'].update(torch.mean(dist_masked).item() * valid_num, valid_num)
+                action_error_sum[action_name]['p1_joints'].update(torch.mean(dist_joints_masked, dim=0).cpu().numpy() * valid_num, valid_num)
         else:
             action_error_sum[action_name]['p1'].update(torch.mean(dist).item() * num, num)
+            action_error_sum[action_name]['p1_joints'].update(torch.mean(dist_joints, dim=0).cpu().numpy() * num, num)
     else:
         for i in range(num):
             if valid_mask is not None and not valid_mask[i]:
                 continue
             action_name = resolve_name(action[i])
             action_error_sum[action_name]['p1'].update(dist[i].item(), 1)
+            action_error_sum[action_name]['p1_joints'].update(dist_joints[i].cpu().numpy(), 1)
 
     return action_error_sum
 
@@ -227,7 +232,7 @@ def define_actions(action):
 def define_error_list(actions):
     error_sum = {}
     error_sum.update({actions[i]:
-                          {'p1': AccumLoss(), 'p2': AccumLoss()}
+                          {'p1': AccumLoss(), 'p2': AccumLoss(), 'p1_joints': AccumLoss()}
                       for i in range(len(actions))})
     return error_sum
 
@@ -264,29 +269,53 @@ def print_error(data_type, action_error_sum, is_train):
     return mean_error_p1, mean_error_p2
 
 def print_error_action(action_error_sum, is_train):
-    mean_error_each = {'p1': 0.0, 'p2': 0.0}
-    mean_error_all = {'p1': AccumLoss(), 'p2': AccumLoss()}
+    mean_error_each = {'p1': 0.0, 'p2': 0.0, 'p1_joints': np.zeros(17)}
+    mean_error_all = {'p1': AccumLoss(), 'p2': AccumLoss(), 'p1_joints': AccumLoss()}
 
     if is_train == 0:
-        print("{0:=^12} {1:=^10} {2:=^8}".format("Action", "p#1 mm", "p#2 mm"))
+        print("{0:=^20} {1:=^8} {2:=^8} {3:=^8} {4:=^8} {5:=^8} {6:=^8} {7:=^8} {8:=^8}".format(
+            "Action", "Shoulder", "Elbow", "Wrist", "Hip", "Knee", "Ankle", "MPJPE", "P-MPJPE"))
 
     for action, value in action_error_sum.items():
         if is_train == 0:
-            print("{0:<12} ".format(action), end="")
+            print("{0:<20} ".format(action), end="")
 
-        # mean_error_each['p1'] = action_error_sum[action]['p1'].avg * 1000.0
         mean_error_each['p1'] = action_error_sum[action]['p1'].avg
         mean_error_all['p1'].update(mean_error_each['p1'], 1)
 
-        # mean_error_each['p2'] = action_error_sum[action]['p2'].avg * 1000.0
         mean_error_each['p2'] = action_error_sum[action]['p2'].avg
         mean_error_all['p2'].update(mean_error_each['p2'], 1)
 
+        if hasattr(action_error_sum[action]['p1_joints'].avg, '__len__'):
+            mean_error_each['p1_joints'] = action_error_sum[action]['p1_joints'].avg
+        else:
+            mean_error_each['p1_joints'] = np.zeros(17)
+            
+        mean_error_all['p1_joints'].update(mean_error_each['p1_joints'], 1)
+
         if is_train == 0:
-            print("{0:>6.2f} {1:>10.2f}".format(mean_error_each['p1'], mean_error_each['p2']))
+            joints = mean_error_each['p1_joints']
+            shoulder = (joints[11] + joints[14]) / 2.0
+            elbow = (joints[12] + joints[15]) / 2.0
+            wrist = (joints[13] + joints[16]) / 2.0
+            hip = (joints[1] + joints[4]) / 2.0
+            knee = (joints[2] + joints[5]) / 2.0
+            ankle = (joints[3] + joints[6]) / 2.0
+            print("{0:>8.2f} {1:>8.2f} {2:>8.2f} {3:>8.2f} {4:>8.2f} {5:>8.2f} {6:>8.2f} {7:>8.2f}".format(
+                shoulder, elbow, wrist, hip, knee, ankle, mean_error_each['p1'], mean_error_each['p2']))
 
     if is_train == 0:
-        print("{0:<12} {1:>6.2f} {2:>10.2f}".format("Average", mean_error_all['p1'].avg, mean_error_all['p2'].avg))
+        avg_joints = mean_error_all['p1_joints'].avg
+        if not hasattr(avg_joints, '__len__'):
+            avg_joints = np.zeros(17)
+        shoulder = (avg_joints[11] + avg_joints[14]) / 2.0
+        elbow = (avg_joints[12] + avg_joints[15]) / 2.0
+        wrist = (avg_joints[13] + avg_joints[16]) / 2.0
+        hip = (avg_joints[1] + avg_joints[4]) / 2.0
+        knee = (avg_joints[2] + avg_joints[5]) / 2.0
+        ankle = (avg_joints[3] + avg_joints[6]) / 2.0
+        print("{0:<20} {1:>8.2f} {2:>8.2f} {3:>8.2f} {4:>8.2f} {5:>8.2f} {6:>8.2f} {7:>8.2f} {8:>8.2f}".format(
+            "Average", shoulder, elbow, wrist, hip, knee, ankle, mean_error_all['p1'].avg, mean_error_all['p2'].avg))
 
     return mean_error_all['p1'].avg, mean_error_all['p2'].avg
 
