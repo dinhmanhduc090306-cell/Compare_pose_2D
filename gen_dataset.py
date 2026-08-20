@@ -4,8 +4,8 @@ import glob
 import numpy as np
 
 # --- CONFIGURATION ---
-JSON_DIR = '/home/levantuananh/h36m/annotations' # Change this to your directory
-OUT_DIR = 'data' # Change this to where you want the .npz files
+JSON_DIR = '/home/duc090306/belief_data/annotations' # Change this to your directory
+OUT_DIR = 'belief_data' # Change this to where you want the .npz files
 
 # Camera IDs typically used in H36M (ensure these match your JSON keys if needed)
 # CAM_IDS = [0, 1, 2, 3]
