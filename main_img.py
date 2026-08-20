@@ -16,6 +16,17 @@ from datetime import datetime
 import pytz
 
 opt = opts().parse()
+
+# Train ONLY on Human3.6M subject S8
+# Human36mDataset uses "8" internally for subject S8.
+opt.subjects_train = '8'
+
+# Keep standard H36M validation subjects
+opt.subjects_test = '9,11'
+
+print(f'Training subjects: {opt.subjects_train}')
+print(f'Testing subjects: {opt.subjects_test}')
+
 exec('from model.' + opt.model + ' import Model')
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
