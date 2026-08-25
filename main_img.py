@@ -246,7 +246,44 @@ if __name__ == '__main__':
     all_param += list(model.parameters())
 
     optimizer = optim.AdamW(all_param, lr=lr, weight_decay=0.1)
+    # ============================================================
+# RESUME CHECKPOINT CONFIGURATION
+# ============================================================
 
+resume_dir = "/content/drive/MyDrive/Pose_compare_checkpoints"
+os.makedirs(resume_dir, exist_ok=True)
+
+latest_checkpoint = os.path.join(
+    resume_dir,
+    "latest_checkpoint.pth"
+)
+
+start_epoch = 1
+
+if os.path.exists(latest_checkpoint):
+    print("=" * 60)
+    print("Found training checkpoint:")
+    print(latest_checkpoint)
+
+    checkpoint = torch.load(
+        latest_checkpoint,
+        map_location=device
+    )
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    start_epoch = checkpoint["epoch"] + 1
+
+    print(f"Resuming from Epoch {start_epoch}")
+    print(f"Previous loss: {checkpoint.get('loss', 'N/A')}")
+    print("=" * 60)
+else:
+    print("No training checkpoint found.")
+    print("Starting from Epoch 1.")
+    #////////////////////////////////////////////////////
+
+    
     local_tz = pytz.timezone("Asia/Shanghai")
     current_time = datetime.now(local_tz).strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = f'runs/{opt.model}_{current_time}'
@@ -255,7 +292,7 @@ if __name__ == '__main__':
     flag = 0
     best_epoch = 0
 
-    for epoch in range(1, opt.nepoch + 1):
+    for epoch in range(start_epoch, opt.nepoch + 1):
         if opt.train:
 
             loss = train(opt, actions, train_dataloader, model, optimizer, epoch, writer)
@@ -266,6 +303,43 @@ if __name__ == '__main__':
             best_epoch = epoch
             opt.previous_name = save_model(opt.previous_name, opt.checkpoint, epoch, p1, model)
             opt.previous_best_threshold = p1
+
+    if opt.train and p1 < opt.previous_best_threshold:
+        best_epoch = epoch
+
+        opt.previous_name = save_model(
+            opt.previous_name,
+            opt.checkpoint,
+            epoch,
+            p1,
+            model
+        )
+
+        opt.previous_best_threshold = p1
+
+    # ========================================================
+    # SAVE FULL RESUME CHECKPOINT
+    # ========================================================
+
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss": loss,
+        "p1": p1,
+        "p2": p2,
+        "lr": lr,
+        "best_epoch": best_epoch,
+        "previous_best_threshold": opt.previous_best_threshold,
+    }
+
+    torch.save(
+        checkpoint,
+        latest_checkpoint
+    )
+
+    print(f"Checkpoint saved after Epoch {epoch}")
+    #//////////////////////////////
 
         if opt.train == 0:
             print('p1: %.2f, p2: %.2f' % (p1, p2))
