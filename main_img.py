@@ -246,8 +246,8 @@ if __name__ == '__main__':
     all_param += list(model.parameters())
 
     optimizer = optim.AdamW(all_param, lr=lr, weight_decay=0.1)
-    # ============================================================
-# RESUME CHECKPOINT CONFIGURATION
+   # ============================================================
+# CHECKPOINT CONFIGURATION
 # ============================================================
 
 resume_dir = "/content/drive/MyDrive/Pose_compare_checkpoints"
@@ -260,9 +260,14 @@ latest_checkpoint = os.path.join(
 
 start_epoch = 1
 
+# ============================================================
+# LOAD PREVIOUS CHECKPOINT IF IT EXISTS
+# ============================================================
+
 if os.path.exists(latest_checkpoint):
+
     print("=" * 60)
-    print("Found training checkpoint:")
+    print("FOUND PREVIOUS CHECKPOINT")
     print(latest_checkpoint)
 
     checkpoint = torch.load(
@@ -270,41 +275,73 @@ if os.path.exists(latest_checkpoint):
         map_location=device
     )
 
-    model.load_state_dict(checkpoint["model_state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
+
+    optimizer.load_state_dict(
+        checkpoint["optimizer_state_dict"]
+    )
 
     start_epoch = checkpoint["epoch"] + 1
 
-    print(f"Resuming from Epoch {start_epoch}")
-    print(f"Previous loss: {checkpoint.get('loss', 'N/A')}")
+    if "lr" in checkpoint:
+        lr = checkpoint["lr"]
+
+    if "best_epoch" in checkpoint:
+        best_epoch = checkpoint["best_epoch"]
+
+    if "previous_best_threshold" in checkpoint:
+        opt.previous_best_threshold = checkpoint[
+            "previous_best_threshold"
+        ]
+
+    print(
+        f"Resuming training from Epoch {start_epoch}"
+    )
+
     print("=" * 60)
+
 else:
-    print("No training checkpoint found.")
-    print("Starting from Epoch 1.")
-    #////////////////////////////////////////////////////
 
-    
-    local_tz = pytz.timezone("Asia/Shanghai")
-    current_time = datetime.now(local_tz).strftime("%Y-%m-%d_%H-%M-%S")
-    log_dir = f'runs/{opt.model}_{current_time}'
-    writer = SummaryWriter(log_dir)
+    print("=" * 60)
+    print("NO PREVIOUS CHECKPOINT FOUND")
+    print("Starting training from Epoch 1")
+    print("=" * 60)
 
-    flag = 0
-    best_epoch = 0
 
-    for epoch in range(start_epoch, opt.nepoch + 1):
-        if opt.train:
+# ============================================================
+# TRAINING LOOP
+# ============================================================
 
-            loss = train(opt, actions, train_dataloader, model, optimizer, epoch, writer)
+for epoch in range(start_epoch, opt.nepoch + 1):
 
-        p1, p2 = val(opt, actions, test_dataloader, model, writer)
+    if opt.train:
 
-        if opt.train and p1 < opt.previous_best_threshold:
-            best_epoch = epoch
-            opt.previous_name = save_model(opt.previous_name, opt.checkpoint, epoch, p1, model)
-            opt.previous_best_threshold = p1
+        loss = train(
+            opt,
+            actions,
+            train_dataloader,
+            model,
+            optimizer,
+            epoch,
+            writer
+        )
+
+    p1, p2 = val(
+        opt,
+        actions,
+        test_dataloader,
+        model,
+        writer
+    )
+
+    # ========================================================
+    # SAVE BEST MODEL
+    # ========================================================
 
     if opt.train and p1 < opt.previous_best_threshold:
+
         best_epoch = epoch
 
         opt.previous_name = save_model(
@@ -318,7 +355,7 @@ else:
         opt.previous_best_threshold = p1
 
     # ========================================================
-    # SAVE FULL RESUME CHECKPOINT
+    # SAVE FULL CHECKPOINT
     # ========================================================
 
     checkpoint = {
@@ -330,44 +367,91 @@ else:
         "p2": p2,
         "lr": lr,
         "best_epoch": best_epoch,
-        "previous_best_threshold": opt.previous_best_threshold,
+        "previous_best_threshold":
+            opt.previous_best_threshold
     }
 
+    # Save individual epoch
+    epoch_checkpoint = os.path.join(
+        resume_dir,
+        f"epoch_{epoch}.pth"
+    )
+
+    torch.save(
+        checkpoint,
+        epoch_checkpoint
+    )
+
+    # Save latest checkpoint
     torch.save(
         checkpoint,
         latest_checkpoint
     )
 
-    print(f"Checkpoint saved after Epoch {epoch}")
-    #//////////////////////////////
+    print(
+        f"Checkpoint saved: Epoch {epoch}"
+    )
 
-        if opt.train == 0:
-            print('p1: %.2f, p2: %.2f' % (p1, p2))
-            break
-        else:
-            logging.info('epoch: %d, lr: %.7f, loss: %.4f, p1: %.2f, p2: %.2f, %d: %.2f' % (epoch, lr, loss, p1, p2, best_epoch, opt.previous_best_threshold))
-            print('e: %d, lr: %.7f, loss: %.4f, p1: %.2f, p2: %.2f, %d: %.2f' % (epoch, lr, loss, p1, p2, best_epoch, opt.previous_best_threshold))
+    # ========================================================
+    # PRINT RESULTS
+    # ========================================================
 
-        if epoch % opt.large_decay_epoch == 0:
-            for param_group in optimizer.param_groups:
-                param_group['lr'] *= opt.lr_decay_large
-                lr *= opt.lr_decay_large
-        else:
-            for param_group in optimizer.param_groups:
-                param_group['lr'] *= opt.lr_decay
-                lr *= opt.lr_decay
+    if opt.train == 0:
 
-    print(opt.checkpoint)
-    end_time = time.time()
-    
-    print("\n" + "="*40)
-    print("Process Completed")
-    print(f"Time Cost: {(end_time - start_time) / 60:.2f} minutes")
-    print("Hardware Info:")
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"  GPU: {gpu_name} ({gpu_memory:.2f} GB)")
+        print(
+            'p1: %.2f, p2: %.2f'
+            % (p1, p2)
+        )
+
+        break
+
     else:
-        print("  GPU: Not available (running on CPU)")
-    print("="*40)
+
+        logging.info(
+            'epoch: %d, lr: %.7f, loss: %.4f, '
+            'p1: %.2f, p2: %.2f, %d: %.2f'
+            % (
+                epoch,
+                lr,
+                loss,
+                p1,
+                p2,
+                best_epoch,
+                opt.previous_best_threshold
+            )
+        )
+
+        print(
+            'e: %d, lr: %.7f, loss: %.4f, '
+            'p1: %.2f, p2: %.2f, %d: %.2f'
+            % (
+                epoch,
+                lr,
+                loss,
+                p1,
+                p2,
+                best_epoch,
+                opt.previous_best_threshold
+            )
+        )
+
+    # ========================================================
+    # LEARNING RATE DECAY
+    # ========================================================
+
+    if epoch % opt.large_decay_epoch == 0:
+
+        for param_group in optimizer.param_groups:
+            param_group['lr'] *= opt.lr_decay_large
+
+        lr *= opt.lr_decay_large
+
+    else:
+
+        for param_group in optimizer.param_groups:
+            param_group['lr'] *= opt.lr_decay
+
+        lr *= opt.lr_decay
+
+
+print(opt.checkpoint)
