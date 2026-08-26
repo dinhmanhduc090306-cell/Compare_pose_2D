@@ -797,8 +797,9 @@ if __name__ == '__main__':
 
 
         pre_dict = torch.load(
-            model_path,
-            map_location=device
+            checkpoint_path,
+            map_location=device,
+            weights_only=False
         )
 
 
@@ -929,7 +930,8 @@ if __name__ == '__main__':
 
         checkpoint = torch.load(
             latest_checkpoint,
-            map_location=device
+            map_location=device,
+            weights_only=False
         )
 
 
