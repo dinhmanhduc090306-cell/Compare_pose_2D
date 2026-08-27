@@ -1362,6 +1362,7 @@ class Fusion(data.Dataset):
                     (
                         min_length,
                         len(BELIEF_CAMERA_IDS),
+                        1,
                         DUMMY_IMAGE_FEATURE_DIM
                     ),
                     dtype=np.float32
