@@ -33,7 +33,7 @@ GT_CAMERA_ID = 0
 # We therefore create zero features with this dimension.
 #
 # Change this only if your model expects another dimension.
-DUMMY_IMAGE_FEATURE_DIM = 2048
+DUMMY_IMAGE_FEATURE_DIM = 459
 
 USE_DUMMY_IMAGE_FEATURES = True
 
