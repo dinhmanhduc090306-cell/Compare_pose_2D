@@ -8,31 +8,18 @@ import torch.utils.data as data
 # CONFIGURATION
 # ============================================================
 
-# Your belief dataset contains:
-#
-# camera0 ... camera8
-#
-# DSVTformer uses 4 views in this configuration.
 BELIEF_CAMERA_IDS = [0, 1, 2, 3]
 
-# Camera used as the 3D supervision/reference coordinate system.
-#
-# Your JSON says:
-#
-# coordinate_system:
-#     absolute_camera_space_m
-#
-# Therefore each camera has its own coordinate system.
-#
-# We use camera0 consistently as the GT reference.
 GT_CAMERA_ID = 0
 
-# Your belief dataset does not contain RGB image features.
+# IMPORTANT:
+# dsvtformer.py currently has:
 #
-# The original DSVTformer image branch expects image features.
-# We therefore create zero features with this dimension.
+#     self.img_proj = nn.Linear(459, 432)
 #
-# Change this only if your model expects another dimension.
+# Therefore the input image feature dimension MUST be 459.
+#
+# Do NOT use 2048 here.
 DUMMY_IMAGE_FEATURE_DIM = 459
 
 USE_DUMMY_IMAGE_FEATURES = True
@@ -43,21 +30,10 @@ USE_DUMMY_IMAGE_FEATURES = True
 # ============================================================
 
 def _to_numpy_float32(x):
-    """
-    Safely convert an object to float32 numpy.
-    """
     return np.asarray(x, dtype=np.float32)
 
 
 def _get_sequence_names(dataset):
-    """
-    Get sequence names from the converted Human36mDataset.
-
-    Expected:
-        video_0_seg_1
-        video_0_seg_2
-        ...
-    """
 
     try:
         return list(dataset.keys())
@@ -75,22 +51,6 @@ def _get_sequence_names(dataset):
 
 
 def _get_sequence(dataset, sequence_name):
-    """
-    Get one sequence from Human36mDataset.
-
-    Expected structure:
-
-        dataset[sequence_name]
-            -> {
-                "default": {
-                    "positions": {
-                        "camera0": ndarray,
-                        ...
-                    },
-                    "cameras": ...
-                }
-            }
-    """
 
     seq = dataset[sequence_name]
 
@@ -104,20 +64,14 @@ def _get_sequence(dataset, sequence_name):
 
 
 def _get_action_data(dataset, sequence_name):
-    """
-    Get the actual action block.
 
-    Your observed structure is:
-
-        video_0_seg_1
-            default
-                positions
-                cameras
-    """
-
-    seq = _get_sequence(dataset, sequence_name)
+    seq = _get_sequence(
+        dataset,
+        sequence_name
+    )
 
     if "default" in seq:
+
         action_data = seq["default"]
 
         if not isinstance(action_data, dict):
@@ -127,15 +81,15 @@ def _get_action_data(dataset, sequence_name):
 
         return action_data
 
-    # Fallback: if another action name exists, use the first one.
     if len(seq) == 1:
+
         action_name = next(iter(seq))
+
         action_data = seq[action_name]
 
         if isinstance(action_data, dict):
             return action_data
 
-    # Some implementations may already expose positions.
     if "positions" in seq:
         return seq
 
@@ -146,15 +100,6 @@ def _get_action_data(dataset, sequence_name):
 
 
 def _get_positions(dataset, sequence_name):
-    """
-    Return the camera dictionary:
-
-        {
-            'camera0': ndarray,
-            ...
-            'camera8': ndarray
-        }
-    """
 
     action_data = _get_action_data(
         dataset,
@@ -162,6 +107,7 @@ def _get_positions(dataset, sequence_name):
     )
 
     if "positions" not in action_data:
+
         raise KeyError(
             f"'positions' not found in {sequence_name}. "
             f"Available keys: {list(action_data.keys())}"
@@ -170,6 +116,7 @@ def _get_positions(dataset, sequence_name):
     positions = action_data["positions"]
 
     if not isinstance(positions, dict):
+
         raise TypeError(
             f"{sequence_name} positions must be dict, "
             f"got {type(positions)}"
@@ -183,13 +130,6 @@ def _get_camera_positions(
     sequence_name,
     camera_id
 ):
-    """
-    Get one camera's 3D pose.
-
-    Expected:
-
-        (T, 17, 3)
-    """
 
     positions = _get_positions(
         dataset,
@@ -199,6 +139,7 @@ def _get_camera_positions(
     camera_name = f"camera{camera_id}"
 
     if camera_name not in positions:
+
         raise KeyError(
             f"{sequence_name} does not contain "
             f"{camera_name}.\n"
@@ -210,12 +151,14 @@ def _get_camera_positions(
     )
 
     if arr.ndim != 3:
+
         raise ValueError(
             f"{sequence_name}/{camera_name}: "
-            f"expected 3D array (T,J,3), got {arr.shape}"
+            f"expected (T,J,3), got {arr.shape}"
         )
 
     if arr.shape[-1] != 3:
+
         raise ValueError(
             f"{sequence_name}/{camera_name}: "
             f"expected last dimension 3, got {arr.shape}"
@@ -229,25 +172,9 @@ def _get_2d_sequence(
     sequence_name,
     camera_ids
 ):
-    """
-    Extract selected 2D camera arrays.
-
-    Supported input format:
-
-        keypoints[sequence_name]["camera0"]
-        keypoints[sequence_name]["camera1"]
-        ...
-
-    Also supports:
-
-        keypoints[sequence_name] = [
-            camera0,
-            camera1,
-            ...
-        ]
-    """
 
     if sequence_name not in keypoints:
+
         raise KeyError(
             f"2D keypoints do not contain sequence "
             f"{sequence_name}"
@@ -268,6 +195,7 @@ def _get_2d_sequence(
             camera_name = f"camera{camera_id}"
 
             if camera_name not in seq:
+
                 raise KeyError(
                     f"2D sequence {sequence_name} is missing "
                     f"{camera_name}.\n"
@@ -289,6 +217,7 @@ def _get_2d_sequence(
         for camera_id in camera_ids:
 
             if camera_id >= len(seq):
+
                 raise IndexError(
                     f"2D sequence {sequence_name} contains "
                     f"{len(seq)} cameras, requested camera "
@@ -318,12 +247,14 @@ def _get_2d_sequence(
     ):
 
         if arr.ndim != 3:
+
             raise ValueError(
                 f"{sequence_name}/camera{camera_id}: "
                 f"expected (T,J,2), got {arr.shape}"
             )
 
         if arr.shape[-1] != 2:
+
             raise ValueError(
                 f"{sequence_name}/camera{camera_id}: "
                 f"expected last dimension 2, got {arr.shape}"
@@ -337,22 +268,9 @@ def _make_view_stack(
     sequence_name,
     expected_last_dim
 ):
-    """
-    Convert:
-
-        [
-            (T,J,C),
-            (T,J,C),
-            (T,J,C),
-            (T,J,C)
-        ]
-
-    into:
-
-        (T,4,J,C)
-    """
 
     if len(arrays) == 0:
+
         raise ValueError(
             f"No camera arrays for {sequence_name}"
         )
@@ -375,6 +293,7 @@ def _make_view_stack(
     ]
 
     if len(set(joint_counts)) != 1:
+
         raise ValueError(
             f"Different joint counts in {sequence_name}: "
             f"{joint_counts}"
@@ -383,6 +302,7 @@ def _make_view_stack(
     for arr in arrays:
 
         if arr.shape[-1] != expected_last_dim:
+
             raise ValueError(
                 f"Invalid final dimension in {sequence_name}: "
                 f"{arr.shape}"
@@ -397,9 +317,6 @@ def _make_view_stack(
 
 
 def _find_2d_file(root_path):
-    """
-    Find the 2D NPZ generated for the project.
-    """
 
     candidates = [
 
@@ -482,6 +399,7 @@ class ChunkedGenerator:
     ):
 
         if len(poses_2d) == 0:
+
             raise ValueError(
                 "poses_2d is empty."
             )
@@ -491,6 +409,7 @@ class ChunkedGenerator:
             if set(poses_3d.keys()) != set(
                 poses_2d.keys()
             ):
+
                 raise ValueError(
                     "3D and 2D sequence keys do not match."
                 )
@@ -498,6 +417,7 @@ class ChunkedGenerator:
         if set(images.keys()) != set(
             poses_2d.keys()
         ):
+
             raise ValueError(
                 "Image-feature and 2D sequence keys "
                 "do not match."
@@ -556,29 +476,11 @@ class ChunkedGenerator:
 
         for seq_key in poses_2d.keys():
 
-            seq_2d = poses_2d[
-                seq_key
-            ]
+            seq_2d = poses_2d[seq_key]
 
             frame_count = seq_2d.shape[0]
 
-            if poses_3d is not None:
-
-                seq_3d = poses_3d[
-                    seq_key
-                ]
-
-                if seq_3d.shape[0] != frame_count:
-
-                    raise ValueError(
-                        f"Frame mismatch for {seq_key}: "
-                        f"2D={frame_count}, "
-                        f"3D={seq_3d.shape[0]}"
-                    )
-
-            seq_img = images[
-                seq_key
-            ]
+            seq_img = images[seq_key]
 
             if seq_img.shape[0] != frame_count:
 
@@ -588,6 +490,18 @@ class ChunkedGenerator:
                     f"2D={frame_count}, "
                     f"images={seq_img.shape[0]}"
                 )
+
+            if poses_3d is not None:
+
+                seq_3d = poses_3d[seq_key]
+
+                if seq_3d.shape[0] != frame_count:
+
+                    raise ValueError(
+                        f"Frame mismatch for {seq_key}: "
+                        f"2D={frame_count}, "
+                        f"3D={seq_3d.shape[0]}"
+                    )
 
             if frame_count == 0:
                 continue
@@ -615,13 +529,9 @@ class ChunkedGenerator:
                 n_chunks
             ):
 
-                start = bounds[
-                    chunk_id
-                ]
+                start = bounds[chunk_id]
 
-                end = bounds[
-                    chunk_id + 1
-                ]
+                end = bounds[chunk_id + 1]
 
                 self.pairs.append(
                     (
@@ -633,7 +543,6 @@ class ChunkedGenerator:
                     )
                 )
 
-                # Reverse augmentation
                 if reverse_aug:
 
                     self.pairs.append(
@@ -646,7 +555,6 @@ class ChunkedGenerator:
                         )
                     )
 
-                # Mirror augmentation
                 if augment:
 
                     self.pairs.append(
@@ -673,9 +581,7 @@ class ChunkedGenerator:
 
             if poses_3d is not None:
 
-                self.saved_index[
-                    seq_key
-                ] = [
+                self.saved_index[seq_key] = [
                     start_index,
                     start_index + frame_count
                 ]
@@ -689,14 +595,8 @@ class ChunkedGenerator:
         ) // self.batch_size
 
         self.batch_3d = None
-
         self.batch_2d = None
-
         self.batch_images = None
-
-    # --------------------------------------------------------
-    # Utility
-    # --------------------------------------------------------
 
     def num_frames(self):
 
@@ -706,23 +606,13 @@ class ChunkedGenerator:
         )
 
     def random_state(self):
-
         return self.random
 
-    def set_random_state(
-        self,
-        random
-    ):
-
+    def set_random_state(self, random):
         self.random = random
 
     def augment_enabled(self):
-
         return self.augment
-
-    # --------------------------------------------------------
-    # Pairs
-    # --------------------------------------------------------
 
     def next_pairs(self):
 
@@ -747,9 +637,9 @@ class ChunkedGenerator:
 
         return self.state
 
-    # --------------------------------------------------------
-    # Get batch
-    # --------------------------------------------------------
+    # ========================================================
+    # GET BATCH
+    # ========================================================
 
     def get_batch(
         self,
@@ -761,24 +651,17 @@ class ChunkedGenerator:
         reverse
     ):
 
-        seq_2d = self.poses_2d[
-            seq_key
-        ]
+        seq_2d = self.poses_2d[seq_key]
 
-        seq_img = self.images[
-            seq_key
-        ]
+        seq_img = self.images[seq_key]
 
         seq_3d = None
 
         if self.poses_3d is not None:
-
-            seq_3d = self.poses_3d[
-                seq_key
-            ]
+            seq_3d = self.poses_3d[seq_key]
 
         # ----------------------------------------------------
-        # 2D temporal range
+        # 2D range
         # ----------------------------------------------------
 
         start_2d = (
@@ -822,7 +705,7 @@ class ChunkedGenerator:
         ]
 
         # ----------------------------------------------------
-        # Edge padding
+        # Padding
         # ----------------------------------------------------
 
         if (
@@ -907,43 +790,36 @@ class ChunkedGenerator:
 
         else:
 
-            self.batch_3d = None
+            self.batch_3d = np.zeros(
+                (0,),
+                dtype=np.float32
+            )
 
         # ----------------------------------------------------
-        # Return
+        # Camera placeholder
         # ----------------------------------------------------
 
-        # The belief dataset does not contain calibration
-        # parameters compatible with the original H36M camera
-        # object.
         camera_output = np.zeros(
             9,
             dtype=np.float32
         )
 
-        if seq_3d is not None:
-
-            return (
-                camera_output,
-                self.batch_3d.copy(),
-                self.batch_2d.copy(),
-                self.batch_images.copy(),
-                seq_key[1],
-                seq_key[0],
-                low_2d,
-                high_2d
-            )
+        # ----------------------------------------------------
+        # Return
+        # ----------------------------------------------------
 
         return (
             camera_output,
-            np.zeros(
-                (0,),
-                dtype=np.float32
-            ),
+            self.batch_3d.copy(),
             self.batch_2d.copy(),
             self.batch_images.copy(),
+
+            # action
             seq_key[1],
+
+            # subject
             seq_key[0],
+
             low_2d,
             high_2d
         )
@@ -954,49 +830,6 @@ class ChunkedGenerator:
 # ============================================================
 
 class Fusion(data.Dataset):
-
-    """
-    DSVTformer Fusion dataset for the converted belief dataset.
-
-    Actual 3D structure:
-
-        dataset[
-            "video_0_seg_1"
-        ][
-            "default"
-        ][
-            "positions"
-        ][
-            "camera0"
-        ]
-
-    where camera0 has:
-
-        (T, 17, 3)
-
-    Actual 2D structure:
-
-        positions_2d[
-            "video_0_seg_1"
-        ][
-            "camera0"
-        ]
-
-    where camera0 has:
-
-        (T, 17, 2)
-
-    Final model input:
-
-        2D:
-            (T, 4, 17, 2)
-
-        image features:
-            (T, 4, 2048)
-
-        3D:
-            (T, 17, 3)
-    """
 
     def __init__(
         self,
@@ -1130,31 +963,25 @@ class Fusion(data.Dataset):
         # Symmetry
         # ----------------------------------------------------
 
-        self._setup_symmetry(
-            dataset
-        )
+        self._setup_symmetry(dataset)
 
         # ----------------------------------------------------
         # Prepare
         # ----------------------------------------------------
 
-        self.keypoints, self.img = (
-            self.prepare_data(
-                dataset
-            )
+        self.keypoints, self.img = self.prepare_data(
+            dataset
         )
 
         # ----------------------------------------------------
-        # Select sequences
+        # Select
         # ----------------------------------------------------
 
-        if self.train:
-
-            selected = self.train_list
-
-        else:
-
-            selected = self.test_list
+        selected = (
+            self.train_list
+            if self.train
+            else self.test_list
+        )
 
         (
             self.cameras_train,
@@ -1172,12 +999,10 @@ class Fusion(data.Dataset):
             raise RuntimeError(
                 "\nNo sequences were selected.\n"
                 f"Requested subjects: {selected}\n"
-                "Available belief sequences include names "
-                "such as video_0_seg_1.\n"
             )
 
         # ----------------------------------------------------
-        # Training
+        # Generator
         # ----------------------------------------------------
 
         if self.train:
@@ -1185,7 +1010,10 @@ class Fusion(data.Dataset):
             generator_batch_size = max(
                 1,
                 self.batch_size
-                // max(1, self.stride)
+                // max(
+                    1,
+                    self.stride
+                )
             )
 
             self.generator = ChunkedGenerator(
@@ -1210,33 +1038,16 @@ class Fusion(data.Dataset):
 
             print(
                 "INFO: Training on {} chunks".format(
-                    len(
-                        self.generator.pairs
-                    )
+                    len(self.generator.pairs)
                 )
             )
 
-        # ----------------------------------------------------
-        # Testing
-        # ----------------------------------------------------
-
         else:
 
-            self.cameras_test = (
-                self.cameras_train
-            )
-
-            self.poses_test = (
-                self.poses_train
-            )
-
-            self.poses_test_2d = (
-                self.poses_train_2d
-            )
-
-            self.images_test = (
-                self.images_train
-            )
+            self.cameras_test = self.cameras_train
+            self.poses_test = self.poses_train
+            self.poses_test_2d = self.poses_train_2d
+            self.images_test = self.images_train
 
             self.generator = ChunkedGenerator(
                 max(
@@ -1258,15 +1069,11 @@ class Fusion(data.Dataset):
                 out_all=self.out_all
             )
 
-            self.key_index = (
-                self.generator.saved_index
-            )
+            self.key_index = self.generator.saved_index
 
             print(
                 "INFO: Testing on {} frames".format(
-                    len(
-                        self.generator.pairs
-                    )
+                    len(self.generator.pairs)
                 )
             )
 
@@ -1295,10 +1102,7 @@ class Fusion(data.Dataset):
     # SYMMETRY
     # ========================================================
 
-    def _setup_symmetry(
-        self,
-        dataset
-    ):
+    def _setup_symmetry(self, dataset):
 
         try:
 
@@ -1325,30 +1129,14 @@ class Fusion(data.Dataset):
         except Exception:
             pass
 
-        # MPI-INF-3DHP 17-joint fallback.
-        #
-        # If your model has its own exact joint ordering,
-        # these can be changed later.
         self.kps_left = [
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-            8
+            1, 2, 3, 4,
+            5, 6, 7, 8
         ]
 
         self.kps_right = [
-            9,
-            10,
-            11,
-            12,
-            13,
-            14,
-            15,
-            16
+            9, 10, 11, 12,
+            13, 14, 15, 16
         ]
 
         self.joints_left = list(
@@ -1363,10 +1151,7 @@ class Fusion(data.Dataset):
     # PREPARE DATA
     # ========================================================
 
-    def prepare_data(
-        self,
-        dataset
-    ):
+    def prepare_data(self, dataset):
 
         print(
             "\n"
@@ -1382,7 +1167,7 @@ class Fusion(data.Dataset):
         )
 
         # ----------------------------------------------------
-        # Find 2D NPZ
+        # 2D NPZ
         # ----------------------------------------------------
 
         keypoints_path = _find_2d_file(
@@ -1410,17 +1195,17 @@ class Fusion(data.Dataset):
         if "positions_2d" not in keypoints_npz.files:
 
             raise KeyError(
-                "positions_2d not found in 2D NPZ.\n"
-                f"Available keys: {keypoints_npz.files}"
+                "positions_2d not found in 2D NPZ."
             )
 
-        keypoints = (
-            keypoints_npz[
-                "positions_2d"
-            ].item()
-        )
+        keypoints = keypoints_npz[
+            "positions_2d"
+        ].item()
 
-        if not isinstance(keypoints, dict):
+        if not isinstance(
+            keypoints,
+            dict
+        ):
 
             raise TypeError(
                 "positions_2d must contain a dict."
@@ -1434,24 +1219,19 @@ class Fusion(data.Dataset):
 
             try:
 
-                metadata = (
-                    keypoints_npz[
-                        "metadata"
-                    ].item()
-                )
+                metadata = keypoints_npz[
+                    "metadata"
+                ].item()
 
                 if (
                     isinstance(metadata, dict)
                     and
-                    "keypoints_symmetry"
-                    in metadata
+                    "keypoints_symmetry" in metadata
                 ):
 
-                    symmetry = (
-                        metadata[
-                            "keypoints_symmetry"
-                        ]
-                    )
+                    symmetry = metadata[
+                        "keypoints_symmetry"
+                    ]
 
                     if len(symmetry) >= 2:
 
@@ -1479,13 +1259,11 @@ class Fusion(data.Dataset):
                 )
 
         # ----------------------------------------------------
-        # Dataset sequence names
+        # Sequence matching
         # ----------------------------------------------------
 
         dataset_sequences = set(
-            _get_sequence_names(
-                dataset
-            )
+            _get_sequence_names(dataset)
         )
 
         print(
@@ -1497,10 +1275,6 @@ class Fusion(data.Dataset):
             "2D dataset sequences:",
             len(keypoints)
         )
-
-        # ----------------------------------------------------
-        # Intersection
-        # ----------------------------------------------------
 
         common_sequences = (
             dataset_sequences
@@ -1515,57 +1289,26 @@ class Fusion(data.Dataset):
 
         if len(common_sequences) == 0:
 
-            # Print examples to make debugging easier.
-            print(
-                "\nExample 3D sequences:"
-            )
-
-            for x in list(
-                dataset_sequences
-            )[:10]:
-
-                print(
-                    " ",
-                    x
-                )
-
-            print(
-                "\nExample 2D sequences:"
-            )
-
-            for x in list(
-                keypoints.keys()
-            )[:10]:
-
-                print(
-                    " ",
-                    x
-                )
-
             raise RuntimeError(
                 "No matching sequence names between "
                 "3D and 2D datasets."
             )
 
-        # ----------------------------------------------------
-        # Output structures
-        # ----------------------------------------------------
-
         converted_2d = {}
-
         converted_images = {}
+        converted_3d = {}
 
         # ----------------------------------------------------
-        # Process each sequence
+        # Process
         # ----------------------------------------------------
 
         for sequence_name in sorted(
             common_sequences
         ):
 
-            # ----------------------------------------------
+            # ------------------------------------------------
             # 2D
-            # ----------------------------------------------
+            # ------------------------------------------------
 
             camera_2d = _get_2d_sequence(
                 keypoints,
@@ -1579,11 +1322,9 @@ class Fusion(data.Dataset):
                 expected_last_dim=2
             )
 
-            # ----------------------------------------------
+            # ------------------------------------------------
             # 3D
-            #
-            # Use camera0 as GT.
-            # ----------------------------------------------
+            # ------------------------------------------------
 
             gt_3d = _get_camera_positions(
                 dataset,
@@ -1591,17 +1332,13 @@ class Fusion(data.Dataset):
                 GT_CAMERA_ID
             )
 
-            # ----------------------------------------------
-            # Synchronize frame count
-            # ----------------------------------------------
-
-            lengths = [
-                poses_2d.shape[0],
-                gt_3d.shape[0]
-            ]
+            # ------------------------------------------------
+            # Synchronize
+            # ------------------------------------------------
 
             min_length = min(
-                lengths
+                poses_2d.shape[0],
+                gt_3d.shape[0]
             )
 
             poses_2d = poses_2d[
@@ -1612,18 +1349,19 @@ class Fusion(data.Dataset):
                 :min_length
             ]
 
-            # ----------------------------------------------
-            # Dummy image features
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # IMAGE FEATURES
+            #
+            # IMPORTANT:
+            # 459 features per camera.
+            # ------------------------------------------------
 
             if USE_DUMMY_IMAGE_FEATURES:
 
                 image_features = np.zeros(
                     (
                         min_length,
-                        len(
-                            BELIEF_CAMERA_IDS
-                        ),
+                        len(BELIEF_CAMERA_IDS),
                         DUMMY_IMAGE_FEATURE_DIM
                     ),
                     dtype=np.float32
@@ -1635,76 +1373,24 @@ class Fusion(data.Dataset):
                     "Real image features are not configured."
                 )
 
-            # ----------------------------------------------
-            # Store
-            #
-            # Internal key is:
-            #
-            # (sequence_name, "default")
-            #
-            # This avoids treating video IDs as H36M
-            # subjects.
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # Internal key
+            # ------------------------------------------------
 
             seq_key = (
                 sequence_name,
                 "default"
             )
 
-            converted_2d[
-                seq_key
-            ] = poses_2d
+            converted_2d[seq_key] = poses_2d
 
-            converted_images[
-                seq_key
-            ] = image_features
-
-            # ----------------------------------------------
-            # Store GT separately.
-            # ----------------------------------------------
-
-        # ----------------------------------------------------
-        # 3D output
-        # ----------------------------------------------------
-
-        converted_3d = {}
-
-        for seq_key in converted_2d.keys():
-
-            sequence_name = seq_key[0]
-
-            gt_3d = _get_camera_positions(
-                dataset,
-                sequence_name,
-                GT_CAMERA_ID
+            converted_images[seq_key] = (
+                image_features
             )
 
-            min_length = min(
-                gt_3d.shape[0],
-                converted_2d[
-                    seq_key
-                ].shape[0]
+            converted_3d[seq_key] = (
+                gt_3d.astype(np.float32)
             )
-
-            converted_3d[
-                seq_key
-            ] = gt_3d[
-                :min_length
-            ].astype(
-                np.float32
-            )
-
-            converted_2d[
-                seq_key
-            ] = converted_2d[
-                seq_key
-            ][:min_length]
-
-            converted_images[
-                seq_key
-            ] = converted_images[
-                seq_key
-            ][:min_length]
 
         # ----------------------------------------------------
         # Diagnostics
@@ -1734,6 +1420,11 @@ class Fusion(data.Dataset):
         )
 
         print(
+            "Image feature dimension:",
+            DUMMY_IMAGE_FEATURE_DIM
+        )
+
+        print(
             "Sequences:",
             len(converted_2d)
         )
@@ -1741,9 +1432,7 @@ class Fusion(data.Dataset):
         if len(converted_2d) > 0:
 
             first_key = next(
-                iter(
-                    converted_2d
-                )
+                iter(converted_2d)
             )
 
             print(
@@ -1753,40 +1442,26 @@ class Fusion(data.Dataset):
 
             print(
                 "2D shape:",
-                converted_2d[
-                    first_key
-                ].shape
+                converted_2d[first_key].shape
             )
 
             print(
                 "3D shape:",
-                converted_3d[
-                    first_key
-                ].shape
+                converted_3d[first_key].shape
             )
 
             print(
                 "Image feature shape:",
-                converted_images[
-                    first_key
-                ].shape
+                converted_images[first_key].shape
             )
 
         print(
             "=" * 70
         )
 
-        self._belief_keypoints = (
-            converted_2d
-        )
-
-        self._belief_images = (
-            converted_images
-        )
-
-        self._belief_3d = (
-            converted_3d
-        )
+        self._belief_keypoints = converted_2d
+        self._belief_images = converted_images
+        self._belief_3d = converted_3d
 
         return (
             converted_2d,
@@ -1805,9 +1480,7 @@ class Fusion(data.Dataset):
     ):
 
         out_poses_3d = {}
-
         out_poses_2d = {}
-
         out_images = {}
 
         out_camera_params = None
@@ -1816,10 +1489,6 @@ class Fusion(data.Dataset):
             self._belief_keypoints.keys()
         )
 
-        # ----------------------------------------------------
-        # Requested filters
-        # ----------------------------------------------------
-
         requested = set(
             str(x).strip()
             for x in subjects
@@ -1827,29 +1496,7 @@ class Fusion(data.Dataset):
         )
 
         # ----------------------------------------------------
-        # IMPORTANT
-        #
-        # Original main_img.py uses:
-        #
-        # subjects_train = 8
-        # subjects_test  = 9,11
-        #
-        # Those are H36M subject IDs.
-        #
-        # Your belief dataset instead has:
-        #
-        # video_0_seg_1
-        #
-        # video_1_seg_1
-        #
-        # etc.
-        #
-        # Therefore:
-        #
-        # If the requested list contains actual belief
-        # sequence names or video IDs, filter them.
-        #
-        # Otherwise we use all sequences.
+        # Determine whether filtering is meaningful
         # ----------------------------------------------------
 
         explicit_belief_filter = False
@@ -1858,9 +1505,8 @@ class Fusion(data.Dataset):
 
             sequence_name = key[0]
 
-            if (
-                sequence_name in requested
-            ):
+            if sequence_name in requested:
+
                 explicit_belief_filter = True
                 break
 
@@ -1880,22 +1526,17 @@ class Fusion(data.Dataset):
                         break
 
         # ----------------------------------------------------
-        # Iterate
+        # Select
         # ----------------------------------------------------
 
         for seq_key in all_keys:
 
             sequence_name = seq_key[0]
 
-            # ----------------------------------------------
-            # Optional filter
-            # ----------------------------------------------
-
             if explicit_belief_filter:
 
                 matches = (
-                    sequence_name
-                    in requested
+                    sequence_name in requested
                 )
 
                 if sequence_name.startswith(
@@ -1917,27 +1558,17 @@ class Fusion(data.Dataset):
                 if not matches:
                     continue
 
-            # ----------------------------------------------
-            # Data
-            # ----------------------------------------------
+            out_poses_2d[seq_key] = (
+                self._belief_keypoints[seq_key]
+            )
 
-            out_poses_2d[
-                seq_key
-            ] = self._belief_keypoints[
-                seq_key
-            ]
+            out_images[seq_key] = (
+                self._belief_images[seq_key]
+            )
 
-            out_images[
-                seq_key
-            ] = self._belief_images[
-                seq_key
-            ]
-
-            out_poses_3d[
-                seq_key
-            ] = self._belief_3d[
-                seq_key
-            ]
+            out_poses_3d[seq_key] = (
+                self._belief_3d[seq_key]
+            )
 
         # ----------------------------------------------------
         # Subset
@@ -1947,9 +1578,7 @@ class Fusion(data.Dataset):
 
             subset = float(subset)
 
-            if (
-                0 < subset < 1
-            ):
+            if 0 < subset < 1:
 
                 rng = np.random.RandomState(
                     1234
@@ -1965,9 +1594,7 @@ class Fusion(data.Dataset):
 
                     keep = max(
                         1,
-                        int(
-                            n * subset
-                        )
+                        int(n * subset)
                     )
 
                     indices = rng.choice(
@@ -1978,23 +1605,17 @@ class Fusion(data.Dataset):
 
                     indices.sort()
 
-                    out_poses_3d[
-                        key
-                    ] = out_poses_3d[
-                        key
-                    ][indices]
+                    out_poses_3d[key] = (
+                        out_poses_3d[key][indices]
+                    )
 
-                    out_poses_2d[
-                        key
-                    ] = out_poses_2d[
-                        key
-                    ][indices]
+                    out_poses_2d[key] = (
+                        out_poses_2d[key][indices]
+                    )
 
-                    out_images[
-                        key
-                    ] = out_images[
-                        key
-                    ][indices]
+                    out_images[key] = (
+                        out_images[key][indices]
+                    )
 
         # ----------------------------------------------------
         # Downsample
@@ -2006,29 +1627,23 @@ class Fusion(data.Dataset):
                 out_poses_3d.keys()
             ):
 
-                out_poses_3d[
-                    key
-                ] = out_poses_3d[
-                    key
-                ][
-                    ::self.downsample
-                ]
+                out_poses_3d[key] = (
+                    out_poses_3d[key][
+                        ::self.downsample
+                    ]
+                )
 
-                out_poses_2d[
-                    key
-                ] = out_poses_2d[
-                    key
-                ][
-                    ::self.downsample
-                ]
+                out_poses_2d[key] = (
+                    out_poses_2d[key][
+                        ::self.downsample
+                    ]
+                )
 
-                out_images[
-                    key
-                ] = out_images[
-                    key
-                ][
-                    ::self.downsample
-                ]
+                out_images[key] = (
+                    out_images[key][
+                        ::self.downsample
+                    ]
+                )
 
         # ----------------------------------------------------
         # Diagnostics
@@ -2039,9 +1654,7 @@ class Fusion(data.Dataset):
             + "-" * 70
         )
 
-        print(
-            "FETCH"
-        )
+        print("FETCH")
 
         print(
             "Requested:",
@@ -2056,9 +1669,7 @@ class Fusion(data.Dataset):
         if len(out_poses_3d) > 0:
 
             first_key = next(
-                iter(
-                    out_poses_3d
-                )
+                iter(out_poses_3d)
             )
 
             print(
@@ -2068,23 +1679,17 @@ class Fusion(data.Dataset):
 
             print(
                 "3D:",
-                out_poses_3d[
-                    first_key
-                ].shape
+                out_poses_3d[first_key].shape
             )
 
             print(
                 "2D:",
-                out_poses_2d[
-                    first_key
-                ].shape
+                out_poses_2d[first_key].shape
             )
 
             print(
                 "Images:",
-                out_images[
-                    first_key
-                ].shape
+                out_images[first_key].shape
             )
 
         print(
@@ -2112,10 +1717,7 @@ class Fusion(data.Dataset):
     # GET ITEM
     # ========================================================
 
-    def __getitem__(
-        self,
-        index
-    ):
+    def __getitem__(self, index):
 
         (
             seq_key,
@@ -2123,9 +1725,7 @@ class Fusion(data.Dataset):
             end_3d,
             flip,
             reverse
-        ) = self.generator.pairs[
-            index
-        ]
+        ) = self.generator.pairs[index]
 
         (
             cam,
@@ -2146,89 +1746,66 @@ class Fusion(data.Dataset):
         )
 
         # ----------------------------------------------------
-        # Mirror augmentation
+        # Mirror
         # ----------------------------------------------------
 
         if flip:
 
             input_2d = input_2d.copy()
 
-            # x-coordinate reflection
-            input_2d[
-                ...,
-                0
-            ] *= -1
+            input_2d[..., 0] *= -1
 
             if (
                 self.kps_left is not None
-                and
-                self.kps_right is not None
+                and self.kps_right is not None
             ):
 
                 input_2d[
                     :,
                     :,
-                    self.kps_left
-                    +
-                    self.kps_right,
+                    self.kps_left + self.kps_right,
                     :
                 ] = input_2d[
                     :,
                     :,
-                    self.kps_right
-                    +
-                    self.kps_left,
+                    self.kps_right + self.kps_left,
                     :
                 ]
 
-            if gt_3d is not None:
+            if gt_3d is not None and gt_3d.size > 0:
 
                 gt_3d = gt_3d.copy()
 
-                gt_3d[
-                    ...,
-                    0
-                ] *= -1
+                gt_3d[..., 0] *= -1
 
                 if (
                     self.joints_left is not None
-                    and
-                    self.joints_right is not None
+                    and self.joints_right is not None
                 ):
 
                     gt_3d[
                         :,
-                        self.joints_left
-                        +
-                        self.joints_right,
+                        self.joints_left + self.joints_right,
                         :
                     ] = gt_3d[
                         :,
-                        self.joints_right
-                        +
-                        self.joints_left,
+                        self.joints_right + self.joints_left,
                         :
                     ]
 
         # ----------------------------------------------------
-        # Reverse temporal order
+        # Reverse
         # ----------------------------------------------------
 
         if reverse:
 
-            input_2d = input_2d[
-                ::-1
-            ].copy()
+            input_2d = input_2d[::-1].copy()
 
-            images = images[
-                ::-1
-            ].copy()
+            images = images[::-1].copy()
 
-            if gt_3d is not None:
+            if gt_3d is not None and gt_3d.size > 0:
 
-                gt_3d = gt_3d[
-                    ::-1
-                ].copy()
+                gt_3d = gt_3d[::-1].copy()
 
         # ----------------------------------------------------
         # Test augmentation
@@ -2241,32 +1818,24 @@ class Fusion(data.Dataset):
 
             input_2d_aug = input_2d.copy()
 
-            input_2d_aug[
-                ...,
-                0
-            ] *= -1
+            input_2d_aug[..., 0] *= -1
 
             images_aug = images.copy()
 
             if (
                 self.kps_left is not None
-                and
-                self.kps_right is not None
+                and self.kps_right is not None
             ):
 
                 input_2d_aug[
                     :,
                     :,
-                    self.kps_left
-                    +
-                    self.kps_right,
+                    self.kps_left + self.kps_right,
                     :
                 ] = input_2d_aug[
                     :,
                     :,
-                    self.kps_right
-                    +
-                    self.kps_left,
+                    self.kps_right + self.kps_left,
                     :
                 ]
 
@@ -2288,9 +1857,6 @@ class Fusion(data.Dataset):
 
         # ----------------------------------------------------
         # Bounding box
-        #
-        # Belief data does not contain a detector bounding box.
-        # Use normalized full-frame box.
         # ----------------------------------------------------
 
         bb_box = np.array(
@@ -2303,12 +1869,12 @@ class Fusion(data.Dataset):
             dtype=np.float32
         )
 
-        scale = np.float64(
-            1.0
-        )
+        scale = np.float32(1.0)
 
         # ----------------------------------------------------
-        # Return interface expected by main_img.py
+        # IMPORTANT:
+        # Never return None from __getitem__.
+        # DataLoader cannot collate None.
         # ----------------------------------------------------
 
         return (
