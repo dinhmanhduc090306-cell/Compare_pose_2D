@@ -1879,12 +1879,12 @@ class Fusion(data.Dataset):
         # DataLoader cannot collate None.
         # ----------------------------------------------------
 
-            print(
+        print(
                 "DEBUG input_2d:",
                   input_2d.shape
             )
 
-            print(
+        print(
                   "DEBUG images:",
                  images.shape
             )
