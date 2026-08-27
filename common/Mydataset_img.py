@@ -1,46 +1,456 @@
 import os
-import pickle
 import numpy as np
 import torch
 import torch.utils.data as data
-
-from common.cameras import normalize_screen_coordinates
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-# Your belief dataset has 9 cameras:
+# Your belief dataset contains:
 #
-# camera0
-# camera1
-# ...
-# camera8
+# camera0 ... camera8
 #
-# DSVTformer was originally designed around 4 views.
-#
-# Change this if you want another subset.
+# DSVTformer uses 4 views in this configuration.
 BELIEF_CAMERA_IDS = [0, 1, 2, 3]
 
-# Dummy image-feature dimension.
+# Camera used as the 3D supervision/reference coordinate system.
 #
-# IMPORTANT:
-# Your belief dataset contains pose coordinates but NO RGB images
-# and therefore no CPN image features.
+# Your JSON says:
 #
-# If the model expects CPN features, this dimension may need to
-# match the feature dimension expected by your model.
+# coordinate_system:
+#     absolute_camera_space_m
 #
-# 2048 is the common final feature dimension for many ResNet/CPN
-# configurations.
+# Therefore each camera has its own coordinate system.
+#
+# We use camera0 consistently as the GT reference.
+GT_CAMERA_ID = 0
+
+# Your belief dataset does not contain RGB image features.
+#
+# The original DSVTformer image branch expects image features.
+# We therefore create zero features with this dimension.
+#
+# Change this only if your model expects another dimension.
 DUMMY_IMAGE_FEATURE_DIM = 2048
 
-# If True, create zero-valued image features.
-#
-# This allows the existing main_img.py interface to continue
-# working without RGB images.
 USE_DUMMY_IMAGE_FEATURES = True
+
+
+# ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
+
+def _to_numpy_float32(x):
+    """
+    Safely convert an object to float32 numpy.
+    """
+    return np.asarray(x, dtype=np.float32)
+
+
+def _get_sequence_names(dataset):
+    """
+    Get sequence names from the converted Human36mDataset.
+
+    Expected:
+        video_0_seg_1
+        video_0_seg_2
+        ...
+    """
+
+    try:
+        return list(dataset.keys())
+    except Exception:
+        pass
+
+    try:
+        return list(dataset._data.keys())
+    except Exception:
+        pass
+
+    raise TypeError(
+        "Could not determine sequence names from dataset."
+    )
+
+
+def _get_sequence(dataset, sequence_name):
+    """
+    Get one sequence from Human36mDataset.
+
+    Expected structure:
+
+        dataset[sequence_name]
+            -> {
+                "default": {
+                    "positions": {
+                        "camera0": ndarray,
+                        ...
+                    },
+                    "cameras": ...
+                }
+            }
+    """
+
+    seq = dataset[sequence_name]
+
+    if not isinstance(seq, dict):
+        raise TypeError(
+            f"Sequence {sequence_name} must be dict, "
+            f"got {type(seq)}"
+        )
+
+    return seq
+
+
+def _get_action_data(dataset, sequence_name):
+    """
+    Get the actual action block.
+
+    Your observed structure is:
+
+        video_0_seg_1
+            default
+                positions
+                cameras
+    """
+
+    seq = _get_sequence(dataset, sequence_name)
+
+    if "default" in seq:
+        action_data = seq["default"]
+
+        if not isinstance(action_data, dict):
+            raise TypeError(
+                f"{sequence_name}['default'] must be dict."
+            )
+
+        return action_data
+
+    # Fallback: if another action name exists, use the first one.
+    if len(seq) == 1:
+        action_name = next(iter(seq))
+        action_data = seq[action_name]
+
+        if isinstance(action_data, dict):
+            return action_data
+
+    # Some implementations may already expose positions.
+    if "positions" in seq:
+        return seq
+
+    raise KeyError(
+        f"Could not find action data for {sequence_name}. "
+        f"Available keys: {list(seq.keys())}"
+    )
+
+
+def _get_positions(dataset, sequence_name):
+    """
+    Return the camera dictionary:
+
+        {
+            'camera0': ndarray,
+            ...
+            'camera8': ndarray
+        }
+    """
+
+    action_data = _get_action_data(
+        dataset,
+        sequence_name
+    )
+
+    if "positions" not in action_data:
+        raise KeyError(
+            f"'positions' not found in {sequence_name}. "
+            f"Available keys: {list(action_data.keys())}"
+        )
+
+    positions = action_data["positions"]
+
+    if not isinstance(positions, dict):
+        raise TypeError(
+            f"{sequence_name} positions must be dict, "
+            f"got {type(positions)}"
+        )
+
+    return positions
+
+
+def _get_camera_positions(
+    dataset,
+    sequence_name,
+    camera_id
+):
+    """
+    Get one camera's 3D pose.
+
+    Expected:
+
+        (T, 17, 3)
+    """
+
+    positions = _get_positions(
+        dataset,
+        sequence_name
+    )
+
+    camera_name = f"camera{camera_id}"
+
+    if camera_name not in positions:
+        raise KeyError(
+            f"{sequence_name} does not contain "
+            f"{camera_name}.\n"
+            f"Available cameras: {list(positions.keys())}"
+        )
+
+    arr = _to_numpy_float32(
+        positions[camera_name]
+    )
+
+    if arr.ndim != 3:
+        raise ValueError(
+            f"{sequence_name}/{camera_name}: "
+            f"expected 3D array (T,J,3), got {arr.shape}"
+        )
+
+    if arr.shape[-1] != 3:
+        raise ValueError(
+            f"{sequence_name}/{camera_name}: "
+            f"expected last dimension 3, got {arr.shape}"
+        )
+
+    return arr
+
+
+def _get_2d_sequence(
+    keypoints,
+    sequence_name,
+    camera_ids
+):
+    """
+    Extract selected 2D camera arrays.
+
+    Supported input format:
+
+        keypoints[sequence_name]["camera0"]
+        keypoints[sequence_name]["camera1"]
+        ...
+
+    Also supports:
+
+        keypoints[sequence_name] = [
+            camera0,
+            camera1,
+            ...
+        ]
+    """
+
+    if sequence_name not in keypoints:
+        raise KeyError(
+            f"2D keypoints do not contain sequence "
+            f"{sequence_name}"
+        )
+
+    seq = keypoints[sequence_name]
+
+    output = []
+
+    # --------------------------------------------------------
+    # Dictionary format
+    # --------------------------------------------------------
+
+    if isinstance(seq, dict):
+
+        for camera_id in camera_ids:
+
+            camera_name = f"camera{camera_id}"
+
+            if camera_name not in seq:
+                raise KeyError(
+                    f"2D sequence {sequence_name} is missing "
+                    f"{camera_name}.\n"
+                    f"Available: {list(seq.keys())}"
+                )
+
+            arr = _to_numpy_float32(
+                seq[camera_name]
+            )
+
+            output.append(arr)
+
+    # --------------------------------------------------------
+    # List format
+    # --------------------------------------------------------
+
+    elif isinstance(seq, (list, tuple)):
+
+        for camera_id in camera_ids:
+
+            if camera_id >= len(seq):
+                raise IndexError(
+                    f"2D sequence {sequence_name} contains "
+                    f"{len(seq)} cameras, requested camera "
+                    f"{camera_id}"
+                )
+
+            output.append(
+                _to_numpy_float32(
+                    seq[camera_id]
+                )
+            )
+
+    else:
+
+        raise TypeError(
+            f"Unsupported 2D format for {sequence_name}: "
+            f"{type(seq)}"
+        )
+
+    # --------------------------------------------------------
+    # Validate
+    # --------------------------------------------------------
+
+    for camera_id, arr in zip(
+        camera_ids,
+        output
+    ):
+
+        if arr.ndim != 3:
+            raise ValueError(
+                f"{sequence_name}/camera{camera_id}: "
+                f"expected (T,J,2), got {arr.shape}"
+            )
+
+        if arr.shape[-1] != 2:
+            raise ValueError(
+                f"{sequence_name}/camera{camera_id}: "
+                f"expected last dimension 2, got {arr.shape}"
+            )
+
+    return output
+
+
+def _make_view_stack(
+    arrays,
+    sequence_name,
+    expected_last_dim
+):
+    """
+    Convert:
+
+        [
+            (T,J,C),
+            (T,J,C),
+            (T,J,C),
+            (T,J,C)
+        ]
+
+    into:
+
+        (T,4,J,C)
+    """
+
+    if len(arrays) == 0:
+        raise ValueError(
+            f"No camera arrays for {sequence_name}"
+        )
+
+    lengths = [
+        arr.shape[0]
+        for arr in arrays
+    ]
+
+    min_length = min(lengths)
+
+    arrays = [
+        arr[:min_length]
+        for arr in arrays
+    ]
+
+    joint_counts = [
+        arr.shape[1]
+        for arr in arrays
+    ]
+
+    if len(set(joint_counts)) != 1:
+        raise ValueError(
+            f"Different joint counts in {sequence_name}: "
+            f"{joint_counts}"
+        )
+
+    for arr in arrays:
+
+        if arr.shape[-1] != expected_last_dim:
+            raise ValueError(
+                f"Invalid final dimension in {sequence_name}: "
+                f"{arr.shape}"
+            )
+
+    return np.stack(
+        arrays,
+        axis=1
+    ).astype(
+        np.float32
+    )
+
+
+def _find_2d_file(root_path):
+    """
+    Find the 2D NPZ generated for the project.
+    """
+
+    candidates = [
+
+        os.path.join(
+            root_path,
+            "data_2d_h36m_cpn_ft_h36m_dbb.npz"
+        ),
+
+        os.path.join(
+            root_path,
+            "data_2d_belief.npz"
+        ),
+
+        os.path.join(
+            root_path,
+            "data",
+            "data_2d_h36m_cpn_ft_h36m_dbb.npz"
+        ),
+
+        os.path.join(
+            root_path,
+            "data",
+            "data_2d_belief.npz"
+        ),
+
+        os.path.join(
+            "/content/Compare_pose_2D",
+            "data",
+            "data_2d_h36m_cpn_ft_h36m_dbb.npz"
+        ),
+
+        os.path.join(
+            "/content/Compare_pose_2D",
+            "data",
+            "data_2d_belief.npz"
+        )
+    ]
+
+    for path in candidates:
+
+        if os.path.isfile(path):
+            return path
+
+    raise FileNotFoundError(
+        "\nCould not find 2D keypoint NPZ.\n"
+        "Tried:\n"
+        + "\n".join(
+            f"  {p}"
+            for p in candidates
+        )
+    )
 
 
 # ============================================================
@@ -71,261 +481,42 @@ class ChunkedGenerator:
         out_all=False
     ):
 
-        assert poses_3d is None or (
-            len(poses_3d) == len(poses_2d)
-            and len(poses_3d) == len(images)
-        ), (
-            len(poses_3d),
-            len(poses_2d),
-            len(images)
-        )
-
-        assert cameras is None or (
-            len(cameras) == len(poses_2d)
-            and len(cameras) == len(images)
-        ), (
-            len(cameras),
-            len(poses_2d),
-            len(images)
-        )
-
-        pairs = []
-
-        self.saved_index = {}
-
-        start_index = 0
-
-        # ----------------------------------------------------
-        # Build sequence chunks
-        # ----------------------------------------------------
-
-        for key in poses_2d.keys():
-
-            seq_2d = poses_2d[key]
-
-            if poses_3d is not None:
-                seq_3d = poses_3d[key]
-
-                assert seq_2d.shape[0] == seq_3d.shape[0], (
-                    f"Frame mismatch for {key}: "
-                    f"2D={seq_2d.shape[0]}, "
-                    f"3D={seq_3d.shape[0]}"
-                )
-
-            n_chunks = (
-                seq_2d.shape[0] + chunk_length - 1
-            ) // chunk_length
-
-            offset = (
-                n_chunks * chunk_length
-                - seq_2d.shape[0]
-            ) // 2
-
-            bounds = (
-                np.arange(n_chunks + 1)
-                * chunk_length
-                - offset
+        if len(poses_2d) == 0:
+            raise ValueError(
+                "poses_2d is empty."
             )
-
-            augment_vector = np.full(
-                len(bounds) - 1,
-                False,
-                dtype=bool
-            )
-
-            reverse_augment_vector = np.full(
-                len(bounds) - 1,
-                False,
-                dtype=bool
-            )
-
-            # key is (subject, action)
-            keys = np.tile(
-                np.array(key, dtype=object).reshape(1, 2),
-                (len(bounds) - 1, 1)
-            )
-
-            pairs += list(
-                zip(
-                    keys,
-                    bounds[:-1],
-                    bounds[1:],
-                    augment_vector,
-                    reverse_augment_vector
-                )
-            )
-
-            if reverse_aug:
-
-                pairs += list(
-                    zip(
-                        keys,
-                        bounds[:-1],
-                        bounds[1:],
-                        augment_vector,
-                        ~reverse_augment_vector
-                    )
-                )
-
-            if augment:
-
-                if reverse_aug:
-
-                    pairs += list(
-                        zip(
-                            keys,
-                            bounds[:-1],
-                            bounds[1:],
-                            ~augment_vector,
-                            ~reverse_augment_vector
-                        )
-                    )
-
-                else:
-
-                    pairs += list(
-                        zip(
-                            keys,
-                            bounds[:-1],
-                            bounds[1:],
-                            ~augment_vector,
-                            reverse_augment_vector
-                        )
-                    )
-
-            if poses_3d is not None:
-                end_index = (
-                    start_index
-                    + poses_3d[key].shape[0]
-                )
-
-                self.saved_index[key] = [
-                    start_index,
-                    end_index
-                ]
-
-                start_index = end_index
-
-        # ----------------------------------------------------
-        # Determine dimensions
-        # ----------------------------------------------------
-
-        first_key = next(iter(poses_2d.keys()))
-
-        # cameras:
-        #
-        # Usually:
-        #     cameras[(subject, action)]
-        # = camera information
-        #
-        # We do not actually require camera parameters for the
-        # belief dataset.
-        # ----------------------------------------------------
-
-        if cameras is not None:
-
-            try:
-
-                camera_dim = cameras[first_key].shape[-1]
-
-            except Exception:
-
-                camera_dim = 9
-
-            self.batch_cam = np.empty(
-                (
-                    batch_size,
-                    camera_dim
-                ),
-                dtype=np.float32
-            )
-
-        else:
-
-            self.batch_cam = None
-
-        # ----------------------------------------------------
-        # 3D
-        # ----------------------------------------------------
 
         if poses_3d is not None:
 
-            self.batch_3d = np.empty(
-                (
-                    batch_size,
-                    chunk_length,
-                    poses_3d[first_key].shape[-2],
-                    poses_3d[first_key].shape[-1]
-                ),
-                dtype=np.float32
+            if set(poses_3d.keys()) != set(
+                poses_2d.keys()
+            ):
+                raise ValueError(
+                    "3D and 2D sequence keys do not match."
+                )
+
+        if set(images.keys()) != set(
+            poses_2d.keys()
+        ):
+            raise ValueError(
+                "Image-feature and 2D sequence keys "
+                "do not match."
             )
 
-        else:
-
-            self.batch_3d = None
-
-        # ----------------------------------------------------
-        # 2D
-        #
-        # Expected:
-        #
-        # (T, views, joints, 2)
-        # ----------------------------------------------------
-
-        self.batch_2d = np.empty(
-            (
-                batch_size,
-                chunk_length + 2 * pad,
-                poses_2d[first_key].shape[-3],
-                poses_2d[first_key].shape[-2],
-                poses_2d[first_key].shape[-1]
-            ),
-            dtype=np.float32
+        self.batch_size = max(
+            1,
+            int(batch_size)
         )
 
-        # ----------------------------------------------------
-        # Image features
-        #
-        # Expected:
-        #
-        # (T, views, feature_dim)
-        # ----------------------------------------------------
+        self.pad = int(pad)
 
-        self.batch_images = np.empty(
-            (
-                batch_size,
-                chunk_length + 2 * pad,
-                images[first_key].shape[-2],
-                images[first_key].shape[-1]
-            ),
-            dtype=np.float32
+        self.causal_shift = int(
+            causal_shift
         )
-
-        # ----------------------------------------------------
-        # General state
-        # ----------------------------------------------------
-
-        self.num_batches = (
-            len(pairs) + batch_size - 1
-        ) // batch_size
-
-        self.batch_size = batch_size
-
-        self.random = np.random.RandomState(
-            random_seed
-        )
-
-        self.pairs = pairs
 
         self.shuffle = shuffle
 
-        self.pad = pad
-
-        self.causal_shift = causal_shift
-
         self.endless = endless
-
-        self.state = None
 
         self.cameras = cameras
 
@@ -347,6 +538,162 @@ class ChunkedGenerator:
 
         self.out_all = out_all
 
+        self.random = np.random.RandomState(
+            random_seed
+        )
+
+        self.state = None
+
+        self.saved_index = {}
+
+        self.pairs = []
+
+        start_index = 0
+
+        # ----------------------------------------------------
+        # Build chunks
+        # ----------------------------------------------------
+
+        for seq_key in poses_2d.keys():
+
+            seq_2d = poses_2d[
+                seq_key
+            ]
+
+            frame_count = seq_2d.shape[0]
+
+            if poses_3d is not None:
+
+                seq_3d = poses_3d[
+                    seq_key
+                ]
+
+                if seq_3d.shape[0] != frame_count:
+
+                    raise ValueError(
+                        f"Frame mismatch for {seq_key}: "
+                        f"2D={frame_count}, "
+                        f"3D={seq_3d.shape[0]}"
+                    )
+
+            seq_img = images[
+                seq_key
+            ]
+
+            if seq_img.shape[0] != frame_count:
+
+                raise ValueError(
+                    f"Image feature mismatch for "
+                    f"{seq_key}: "
+                    f"2D={frame_count}, "
+                    f"images={seq_img.shape[0]}"
+                )
+
+            if frame_count == 0:
+                continue
+
+            n_chunks = (
+                frame_count
+                + chunk_length
+                - 1
+            ) // chunk_length
+
+            offset = (
+                n_chunks * chunk_length
+                - frame_count
+            ) // 2
+
+            bounds = (
+                np.arange(
+                    n_chunks + 1
+                )
+                * chunk_length
+                - offset
+            )
+
+            for chunk_id in range(
+                n_chunks
+            ):
+
+                start = bounds[
+                    chunk_id
+                ]
+
+                end = bounds[
+                    chunk_id + 1
+                ]
+
+                self.pairs.append(
+                    (
+                        seq_key,
+                        start,
+                        end,
+                        False,
+                        False
+                    )
+                )
+
+                # Reverse augmentation
+                if reverse_aug:
+
+                    self.pairs.append(
+                        (
+                            seq_key,
+                            start,
+                            end,
+                            False,
+                            True
+                        )
+                    )
+
+                # Mirror augmentation
+                if augment:
+
+                    self.pairs.append(
+                        (
+                            seq_key,
+                            start,
+                            end,
+                            True,
+                            False
+                        )
+                    )
+
+                    if reverse_aug:
+
+                        self.pairs.append(
+                            (
+                                seq_key,
+                                start,
+                                end,
+                                True,
+                                True
+                            )
+                        )
+
+            if poses_3d is not None:
+
+                self.saved_index[
+                    seq_key
+                ] = [
+                    start_index,
+                    start_index + frame_count
+                ]
+
+                start_index += frame_count
+
+        self.num_batches = (
+            len(self.pairs)
+            + self.batch_size
+            - 1
+        ) // self.batch_size
+
+        self.batch_3d = None
+
+        self.batch_2d = None
+
+        self.batch_images = None
+
     # --------------------------------------------------------
     # Utility
     # --------------------------------------------------------
@@ -362,7 +709,10 @@ class ChunkedGenerator:
 
         return self.random
 
-    def set_random_state(self, random):
+    def set_random_state(
+        self,
+        random
+    ):
 
         self.random = random
 
@@ -380,9 +730,14 @@ class ChunkedGenerator:
 
             if self.shuffle:
 
-                pairs = self.random.permutation(
-                    self.pairs
+                indices = self.random.permutation(
+                    len(self.pairs)
                 )
+
+                pairs = [
+                    self.pairs[i]
+                    for i in indices
+                ]
 
             else:
 
@@ -390,9 +745,7 @@ class ChunkedGenerator:
 
             return 0, pairs
 
-        else:
-
-            return self.state
+        return self.state
 
     # --------------------------------------------------------
     # Get batch
@@ -400,7 +753,7 @@ class ChunkedGenerator:
 
     def get_batch(
         self,
-        seq_i,
+        seq_key,
         start_3d,
         end_3d,
         mask,
@@ -408,12 +761,25 @@ class ChunkedGenerator:
         reverse
     ):
 
-        subject, action = seq_i
+        seq_2d = self.poses_2d[
+            seq_key
+        ]
 
-        seq_name = (
-            subject,
-            action
-        )
+        seq_img = self.images[
+            seq_key
+        ]
+
+        seq_3d = None
+
+        if self.poses_3d is not None:
+
+            seq_3d = self.poses_3d[
+                seq_key
+            ]
+
+        # ----------------------------------------------------
+        # 2D temporal range
+        # ----------------------------------------------------
 
         start_2d = (
             start_3d
@@ -427,175 +793,140 @@ class ChunkedGenerator:
             - self.causal_shift
         )
 
-        seq_2d = self.poses_2d[
-            seq_name
-        ]
-
-        seq_img = self.images[
-            seq_name
-        ]
-
-        # ----------------------------------------------------
-        # Ensure lengths match
-        # ----------------------------------------------------
-
-        assert len(seq_2d) == len(seq_img), (
-            f"Length mismatch: "
-            f"poses_2d={len(seq_2d)}, "
-            f"images={len(seq_img)}, "
-            f"sequence={seq_name}"
-        )
-
-        # ----------------------------------------------------
-        # 2D range
-        # ----------------------------------------------------
-
         low_2d = max(
-            start_2d,
-            0
+            0,
+            start_2d
         )
 
         high_2d = min(
-            end_2d,
-            seq_2d.shape[0]
+            seq_2d.shape[0],
+            end_2d
         )
 
-        pad_left_2d = (
+        pad_left = (
             low_2d
             - start_2d
         )
 
-        pad_right_2d = (
+        pad_right = (
             end_2d
             - high_2d
         )
 
+        current_2d = seq_2d[
+            low_2d:high_2d
+        ]
+
+        current_img = seq_img[
+            low_2d:high_2d
+        ]
+
+        # ----------------------------------------------------
+        # Edge padding
+        # ----------------------------------------------------
+
         if (
-            pad_left_2d != 0
-            or pad_right_2d != 0
+            pad_left > 0
+            or pad_right > 0
         ):
 
-            self.batch_2d = np.pad(
-                seq_2d[
-                    low_2d:high_2d
-                ],
+            current_2d = np.pad(
+                current_2d,
                 (
-                    (pad_left_2d, pad_right_2d),
+                    (pad_left, pad_right),
                     (0, 0),
                     (0, 0),
                     (0, 0)
                 ),
-                mode='edge'
+                mode="edge"
             )
 
-            self.batch_images = np.pad(
-                seq_img[
-                    low_2d:high_2d
-                ],
+            current_img = np.pad(
+                current_img,
                 (
-                    (pad_left_2d, pad_right_2d),
+                    (pad_left, pad_right),
                     (0, 0),
                     (0, 0)
                 ),
-                mode='edge'
+                mode="edge"
             )
 
-        else:
+        self.batch_2d = current_2d
 
-            self.batch_2d = seq_2d[
-                low_2d:high_2d
-            ]
-
-            self.batch_images = seq_img[
-                low_2d:high_2d
-            ]
+        self.batch_images = current_img
 
         # ----------------------------------------------------
         # 3D
         # ----------------------------------------------------
 
-        if self.poses_3d is not None:
+        if seq_3d is not None:
 
-            seq_3d = self.poses_3d[
-                seq_name
-            ].copy()
+            low_3d = max(
+                0,
+                start_3d
+            )
 
-            if self.out_all:
+            high_3d = min(
+                seq_3d.shape[0],
+                end_3d
+            )
 
-                low_3d = low_2d
+            pad_left_3d = (
+                low_3d
+                - start_3d
+            )
 
-                high_3d = high_2d
+            pad_right_3d = (
+                end_3d
+                - high_3d
+            )
 
-                pad_left_3d = pad_left_2d
-
-                pad_right_3d = pad_right_2d
-
-            else:
-
-                low_3d = max(
-                    start_3d,
-                    0
-                )
-
-                high_3d = min(
-                    end_3d,
-                    seq_3d.shape[0]
-                )
-
-                pad_left_3d = (
-                    low_3d
-                    - start_3d
-                )
-
-                pad_right_3d = (
-                    end_3d
-                    - high_3d
-                )
+            current_3d = seq_3d[
+                low_3d:high_3d
+            ]
 
             if (
-                pad_left_3d != 0
-                or pad_right_3d != 0
+                pad_left_3d > 0
+                or pad_right_3d > 0
             ):
 
-                self.batch_3d = np.pad(
-                    seq_3d[
-                        low_3d:high_3d
-                    ],
+                current_3d = np.pad(
+                    current_3d,
                     (
-                        (pad_left_3d, pad_right_3d),
+                        (
+                            pad_left_3d,
+                            pad_right_3d
+                        ),
                         (0, 0),
                         (0, 0)
                     ),
-                    mode='edge'
+                    mode="edge"
                 )
 
-            else:
+            self.batch_3d = current_3d
 
-                self.batch_3d = seq_3d[
-                    low_3d:high_3d
-                ]
+        else:
+
+            self.batch_3d = None
 
         # ----------------------------------------------------
         # Return
         # ----------------------------------------------------
 
-        # Belief dataset does not currently provide real
-        # camera calibration parameters.
-        #
-        # Returning None is intentional.
+        # The belief dataset does not contain calibration
+        # parameters compatible with the original H36M camera
+        # object.
         camera_output = None
 
-        if (
-            self.poses_3d is not None
-        ):
+        if seq_3d is not None:
 
             return (
                 camera_output,
                 self.batch_3d.copy(),
                 self.batch_2d.copy(),
                 self.batch_images.copy(),
-                action,
-                subject,
+                seq_key[1],
+                seq_key[0],
                 low_2d,
                 high_2d
             )
@@ -605,227 +936,11 @@ class ChunkedGenerator:
             None,
             self.batch_2d.copy(),
             self.batch_images.copy(),
-            action,
-            subject
+            seq_key[1],
+            seq_key[0],
+            low_2d,
+            high_2d
         )
-
-
-# ============================================================
-# BELIEF DATASET HELPERS
-# ============================================================
-
-def _extract_sequence_id(sequence_name):
-
-    """
-    Convert:
-
-        video_0_seg_1
-
-    into:
-
-        ('video_0', 'seg_1')
-
-    This keeps compatibility with the original DSVTformer
-    (subject, action) indexing.
-    """
-
-    parts = sequence_name.split("_")
-
-    if len(parts) >= 4:
-
-        video_id = parts[1]
-
-        segment_id = parts[3]
-
-        return (
-            f"video_{video_id}",
-            f"seg_{segment_id}"
-        )
-
-    return (
-        sequence_name,
-        "default"
-    )
-
-
-def _load_npz_dict(path, key):
-
-    print(
-        f"\nLoading:\n{path}"
-    )
-
-    if not os.path.exists(path):
-
-        raise FileNotFoundError(
-            f"\nFile not found:\n{path}"
-        )
-
-    data = np.load(
-        path,
-        allow_pickle=True
-    )
-
-    if key not in data:
-
-        raise KeyError(
-            f"'{key}' not found in {path}. "
-            f"Available keys: {data.files}"
-        )
-
-    value = data[key].item()
-
-    print(
-        f"Loaded {len(value)} sequences."
-    )
-
-    return value
-
-
-def _find_belief_file(root_path, filename):
-
-    """
-    Try several common root_path layouts.
-    """
-
-    candidates = [
-
-        os.path.join(
-            root_path,
-            filename
-        ),
-
-        os.path.join(
-            root_path,
-            "belief_data",
-            filename
-        ),
-
-        os.path.join(
-            "/content/drive/MyDrive/belief_data",
-            filename
-        ),
-
-        os.path.join(
-            "/content/Compare_pose_2D",
-            "data",
-            filename
-        )
-    ]
-
-    for path in candidates:
-
-        if os.path.exists(path):
-
-            return path
-
-    raise FileNotFoundError(
-        "\nCould not locate:\n"
-        f"    {filename}\n\n"
-        "Tried:\n"
-        + "\n".join(
-            f"    {p}"
-            for p in candidates
-        )
-    )
-
-
-def _convert_nested_camera_dict(
-    data,
-    camera_ids
-):
-
-    """
-    Convert:
-
-        data[sequence]['camera0']
-
-    into the list:
-
-        [camera0, camera1, camera2, camera3]
-
-    """
-
-    output = {}
-
-    for sequence_name in data:
-
-        sequence = data[
-            sequence_name
-        ]
-
-        camera_arrays = []
-
-        for cam_id in camera_ids:
-
-            camera_name = (
-                f"camera{cam_id}"
-            )
-
-            if camera_name not in sequence:
-
-                raise KeyError(
-                    f"{sequence_name} does not contain "
-                    f"{camera_name}. Available cameras: "
-                    f"{list(sequence.keys())}"
-                )
-
-            arr = np.asarray(
-                sequence[camera_name],
-                dtype=np.float32
-            )
-
-            camera_arrays.append(
-                arr
-            )
-
-        output[
-            sequence_name
-        ] = camera_arrays
-
-    return output
-
-
-def _stack_views(
-    camera_data
-):
-
-    """
-    Convert:
-
-        list of 4 arrays
-        each = (T,J,C)
-
-    into:
-
-        (T,4,J,C)
-    """
-
-    if len(camera_data) == 0:
-
-        raise ValueError(
-            "No camera data."
-        )
-
-    lengths = [
-        arr.shape[0]
-        for arr in camera_data
-    ]
-
-    min_len = min(
-        lengths
-    )
-
-    camera_data = [
-        arr[:min_len]
-        for arr in camera_data
-    ]
-
-    return np.stack(
-        camera_data,
-        axis=1
-    ).astype(
-        np.float32
-    )
 
 
 # ============================================================
@@ -835,33 +950,46 @@ def _stack_views(
 class Fusion(data.Dataset):
 
     """
-    Fusion loader adapted for the belief dataset.
+    DSVTformer Fusion dataset for the converted belief dataset.
 
-    Original DSVTformer expected:
+    Actual 3D structure:
 
-        subject
-            action
-                4 cameras
+        dataset[
+            "video_0_seg_1"
+        ][
+            "default"
+        ][
+            "positions"
+        ][
+            "camera0"
+        ]
 
-    Belief dataset provides:
-
-        video_X_seg_Y
-            camera0
-            ...
-            camera8
-
-    This implementation converts the selected cameras into:
-
-        (T, 4, 17, 2)
-
-    for 2D input.
-
-    3D is:
+    where camera0 has:
 
         (T, 17, 3)
 
-    Image features are dummy zero features because the belief
-    dataset contains no RGB images.
+    Actual 2D structure:
+
+        positions_2d[
+            "video_0_seg_1"
+        ][
+            "camera0"
+        ]
+
+    where camera0 has:
+
+        (T, 17, 2)
+
+    Final model input:
+
+        2D:
+            (T, 4, 17, 2)
+
+        image features:
+            (T, 4, 2048)
+
+        3D:
+            (T, 17, 3)
     """
 
     def __init__(
@@ -872,50 +1000,146 @@ class Fusion(data.Dataset):
         train=True
     ):
 
-        self.data_type = opt.dataset
+        super().__init__()
+
+        self.data_type = getattr(
+            opt,
+            "dataset",
+            "belief"
+        )
 
         self.train = train
 
-        self.keypoints_name = opt.keypoints
+        self.keypoints_name = getattr(
+            opt,
+            "keypoints",
+            "cpn"
+        )
 
         self.root_path = root_path
 
         # ----------------------------------------------------
-        # Determine split
+        # Options
         # ----------------------------------------------------
 
-        self.train_list = (
-            opt.subjects_train.split(",")
+        self.train_list = self._get_subject_list(
+            getattr(
+                opt,
+                "subjects_train",
+                ""
+            )
         )
 
-        self.test_list = (
-            opt.subjects_test.split(",")
+        self.test_list = self._get_subject_list(
+            getattr(
+                opt,
+                "subjects_test",
+                ""
+            )
+        )
+
+        actions = getattr(
+            opt,
+            "actions",
+            "*"
         )
 
         self.action_filter = (
             None
-            if opt.actions == '*'
-            else opt.actions.split(',')
+            if actions == "*"
+            else str(actions).split(",")
         )
 
-        self.downsample = opt.downsample
+        self.downsample = int(
+            getattr(
+                opt,
+                "downsample",
+                1
+            )
+        )
 
-        self.subset = opt.subset
+        self.subset = float(
+            getattr(
+                opt,
+                "subset",
+                1
+            )
+        )
 
-        self.stride = opt.stride
+        self.stride = int(
+            getattr(
+                opt,
+                "stride",
+                1
+            )
+        )
 
-        self.crop_uv = opt.crop_uv
+        self.crop_uv = getattr(
+            opt,
+            "crop_uv",
+            False
+        )
 
-        self.test_aug = opt.test_augmentation
+        self.test_aug = getattr(
+            opt,
+            "test_augmentation",
+            False
+        )
 
-        self.pad = opt.pad
+        self.pad = int(
+            getattr(
+                opt,
+                "pad",
+                0
+            )
+        )
+
+        self.batch_size = int(
+            getattr(
+                opt,
+                "batch_size",
+                1
+            )
+        )
+
+        self.data_augmentation = getattr(
+            opt,
+            "data_augmentation",
+            False
+        )
+
+        self.reverse_augmentation = getattr(
+            opt,
+            "reverse_augmentation",
+            False
+        )
+
+        self.out_all = getattr(
+            opt,
+            "out_all",
+            False
+        )
 
         # ----------------------------------------------------
-        # For belief data, the dataset passed by main_img.py
-        # is already a Human36mDataset-compatible object after
-        # we replace its loader.
-        #
-        # We nevertheless identify the actual sequences here.
+        # Symmetry
+        # ----------------------------------------------------
+
+        self._setup_symmetry(
+            dataset
+        )
+
+        # ----------------------------------------------------
+        # Prepare
+        # ----------------------------------------------------
+
+        self.keypoints, self.img = (
+            self.prepare_data(
+                dataset
+            )
+        )
+
+        # ----------------------------------------------------
+        # Select sequences
         # ----------------------------------------------------
 
         if self.train:
@@ -925,17 +1149,6 @@ class Fusion(data.Dataset):
         else:
 
             selected = self.test_list
-
-        # ----------------------------------------------------
-        # Prepare data
-        # ----------------------------------------------------
-
-        self.keypoints, self.img = (
-            self.prepare_data(
-                dataset,
-                selected
-            )
-        )
 
         (
             self.cameras_train,
@@ -948,30 +1161,58 @@ class Fusion(data.Dataset):
             subset=self.subset
         )
 
+        if len(self.poses_train_2d) == 0:
+
+            raise RuntimeError(
+                "\nNo sequences were selected.\n"
+                f"Requested subjects: {selected}\n"
+                "Available belief sequences include names "
+                "such as video_0_seg_1.\n"
+            )
+
+        # ----------------------------------------------------
+        # Training
+        # ----------------------------------------------------
+
         if self.train:
 
+            generator_batch_size = max(
+                1,
+                self.batch_size
+                // max(1, self.stride)
+            )
+
             self.generator = ChunkedGenerator(
-                opt.batch_size // opt.stride,
+                generator_batch_size,
                 self.cameras_train,
                 self.poses_train,
                 self.poses_train_2d,
                 self.images_train,
-                self.stride,
+                chunk_length=max(
+                    1,
+                    self.stride
+                ),
                 pad=self.pad,
-                augment=opt.data_augmentation,
-                reverse_aug=opt.reverse_augmentation,
+                augment=self.data_augmentation,
+                reverse_aug=self.reverse_augmentation,
                 kps_left=self.kps_left,
                 kps_right=self.kps_right,
                 joints_left=self.joints_left,
                 joints_right=self.joints_right,
-                out_all=opt.out_all
+                out_all=self.out_all
             )
 
             print(
-                "INFO: Training on {} frames".format(
-                    self.generator.num_frames()
+                "INFO: Training on {} chunks".format(
+                    len(
+                        self.generator.pairs
+                    )
                 )
             )
+
+        # ----------------------------------------------------
+        # Testing
+        # ----------------------------------------------------
 
         else:
 
@@ -992,7 +1233,10 @@ class Fusion(data.Dataset):
             )
 
             self.generator = ChunkedGenerator(
-                opt.batch_size // opt.stride,
+                max(
+                    1,
+                    self.batch_size
+                ),
                 self.cameras_test,
                 self.poses_test,
                 self.poses_test_2d,
@@ -1000,10 +1244,12 @@ class Fusion(data.Dataset):
                 chunk_length=1,
                 pad=self.pad,
                 augment=False,
+                reverse_aug=False,
                 kps_left=self.kps_left,
                 kps_right=self.kps_right,
                 joints_left=self.joints_left,
-                joints_right=self.joints_right
+                joints_right=self.joints_right,
+                out_all=self.out_all
             )
 
             self.key_index = (
@@ -1012,9 +1258,100 @@ class Fusion(data.Dataset):
 
             print(
                 "INFO: Testing on {} frames".format(
-                    self.generator.num_frames()
+                    len(
+                        self.generator.pairs
+                    )
                 )
             )
+
+    # ========================================================
+    # SUBJECT LIST
+    # ========================================================
+
+    @staticmethod
+    def _get_subject_list(value):
+
+        if value is None:
+            return []
+
+        value = str(value).strip()
+
+        if value == "":
+            return []
+
+        return [
+            x.strip()
+            for x in value.split(",")
+            if x.strip()
+        ]
+
+    # ========================================================
+    # SYMMETRY
+    # ========================================================
+
+    def _setup_symmetry(
+        self,
+        dataset
+    ):
+
+        try:
+
+            skeleton = dataset.skeleton()
+
+            self.kps_left = list(
+                skeleton.joints_left()
+            )
+
+            self.kps_right = list(
+                skeleton.joints_right()
+            )
+
+            self.joints_left = list(
+                skeleton.joints_left()
+            )
+
+            self.joints_right = list(
+                skeleton.joints_right()
+            )
+
+            return
+
+        except Exception:
+            pass
+
+        # MPI-INF-3DHP 17-joint fallback.
+        #
+        # If your model has its own exact joint ordering,
+        # these can be changed later.
+        self.kps_left = [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+        ]
+
+        self.kps_right = [
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16
+        ]
+
+        self.joints_left = list(
+            self.kps_left
+        )
+
+        self.joints_right = list(
+            self.kps_right
+        )
 
     # ========================================================
     # PREPARE DATA
@@ -1022,110 +1359,84 @@ class Fusion(data.Dataset):
 
     def prepare_data(
         self,
-        dataset,
-        folder_list
+        dataset
     ):
 
-        # ----------------------------------------------------
-        # Keypoint symmetry
-        # ----------------------------------------------------
+        print(
+            "\n"
+            + "=" * 70
+        )
 
-        if (
-            hasattr(dataset, "skeleton")
-        ):
+        print(
+            "Preparing belief dataset"
+        )
 
-            self.kps_left = list(
-                dataset.skeleton().joints_left()
-            )
-
-            self.kps_right = list(
-                dataset.skeleton().joints_right()
-            )
-
-            self.joints_left = list(
-                dataset.skeleton().joints_left()
-            )
-
-            self.joints_right = list(
-                dataset.skeleton().joints_right()
-            )
-
-        else:
-
-            # H36M 32-joint symmetry
-            self.kps_left = [
-                6, 7, 8, 9, 10,
-                16, 17, 18, 19,
-                20, 21, 22, 23
-            ]
-
-            self.kps_right = [
-                1, 2, 3, 4, 5,
-                24, 25, 26, 27,
-                28, 29, 30, 31
-            ]
-
-            self.joints_left = (
-                self.kps_left
-            )
-
-            self.joints_right = (
-                self.kps_right
-            )
+        print(
+            "=" * 70
+        )
 
         # ----------------------------------------------------
-        # Load normalized 2D belief data
+        # Find 2D NPZ
         # ----------------------------------------------------
 
-        try:
+        keypoints_path = _find_2d_file(
+            self.root_path
+        )
 
-            keypoints_path = (
-                _find_belief_file(
-                    self.root_path,
-                    "data_2d_h36m_cpn_ft_h36m_dbb.npz"
-                )
-            )
+        print(
+            "2D keypoint file:"
+        )
 
-        except FileNotFoundError:
+        print(
+            keypoints_path
+        )
 
-            keypoints_path = (
-                _find_belief_file(
-                    self.root_path,
-                    "data_2d_belief.npz"
-                )
-            )
-
-        keypoints_raw = np.load(
+        keypoints_npz = np.load(
             keypoints_path,
             allow_pickle=True
         )
 
         print(
-            "\n2D NPZ keys:",
-            keypoints_raw.files
+            "2D NPZ keys:",
+            keypoints_npz.files
         )
 
+        if "positions_2d" not in keypoints_npz.files:
+
+            raise KeyError(
+                "positions_2d not found in 2D NPZ.\n"
+                f"Available keys: {keypoints_npz.files}"
+            )
+
         keypoints = (
-            keypoints_raw[
+            keypoints_npz[
                 "positions_2d"
             ].item()
         )
 
+        if not isinstance(keypoints, dict):
+
+            raise TypeError(
+                "positions_2d must contain a dict."
+            )
+
         # ----------------------------------------------------
-        # Detect metadata
+        # Metadata
         # ----------------------------------------------------
 
-        if "metadata" in keypoints_raw.files:
+        if "metadata" in keypoints_npz.files:
 
             try:
 
                 metadata = (
-                    keypoints_raw[
+                    keypoints_npz[
                         "metadata"
                     ].item()
                 )
 
                 if (
+                    isinstance(metadata, dict)
+                    and
                     "keypoints_symmetry"
                     in metadata
                 ):
@@ -1136,278 +1447,261 @@ class Fusion(data.Dataset):
                         ]
                     )
 
-                    self.kps_left = list(
-                        symmetry[0]
-                    )
+                    if len(symmetry) >= 2:
 
-                    self.kps_right = list(
-                        symmetry[1]
-                    )
+                        self.kps_left = list(
+                            symmetry[0]
+                        )
+
+                        self.kps_right = list(
+                            symmetry[1]
+                        )
+
+                        self.joints_left = list(
+                            symmetry[0]
+                        )
+
+                        self.joints_right = list(
+                            symmetry[1]
+                        )
 
             except Exception as e:
 
                 print(
-                    "WARNING: Could not read 2D metadata:",
-                    e
+                    "WARNING: Could not parse "
+                    f"2D metadata: {e}"
                 )
 
         # ----------------------------------------------------
-        # Convert belief sequence structure
+        # Dataset sequence names
         # ----------------------------------------------------
 
-        converted_keypoints = {}
+        dataset_sequences = set(
+            _get_sequence_names(
+                dataset
+            )
+        )
 
-        for sequence_name in keypoints:
+        print(
+            "3D dataset sequences:",
+            len(dataset_sequences)
+        )
 
-            if sequence_name not in dataset:
+        print(
+            "2D dataset sequences:",
+            len(keypoints)
+        )
 
-                continue
+        # ----------------------------------------------------
+        # Intersection
+        # ----------------------------------------------------
 
-            camera_dict = (
-                keypoints[
-                    sequence_name
-                ]
+        common_sequences = (
+            dataset_sequences
+            &
+            set(keypoints.keys())
+        )
+
+        print(
+            "Matching sequences:",
+            len(common_sequences)
+        )
+
+        if len(common_sequences) == 0:
+
+            # Print examples to make debugging easier.
+            print(
+                "\nExample 3D sequences:"
             )
 
-            camera_arrays = []
+            for x in list(
+                dataset_sequences
+            )[:10]:
 
-            for cam_id in BELIEF_CAMERA_IDS:
-
-                camera_name = (
-                    f"camera{cam_id}"
+                print(
+                    " ",
+                    x
                 )
 
-                if (
-                    camera_name
-                    not in camera_dict
-                ):
+            print(
+                "\nExample 2D sequences:"
+            )
 
-                    raise KeyError(
-                        f"Missing {camera_name} "
-                        f"in {sequence_name}"
-                    )
+            for x in list(
+                keypoints.keys()
+            )[:10]:
 
-                arr = np.asarray(
-                    camera_dict[
-                        camera_name
-                    ],
+                print(
+                    " ",
+                    x
+                )
+
+            raise RuntimeError(
+                "No matching sequence names between "
+                "3D and 2D datasets."
+            )
+
+        # ----------------------------------------------------
+        # Output structures
+        # ----------------------------------------------------
+
+        converted_2d = {}
+
+        converted_images = {}
+
+        # ----------------------------------------------------
+        # Process each sequence
+        # ----------------------------------------------------
+
+        for sequence_name in sorted(
+            common_sequences
+        ):
+
+            # ----------------------------------------------
+            # 2D
+            # ----------------------------------------------
+
+            camera_2d = _get_2d_sequence(
+                keypoints,
+                sequence_name,
+                BELIEF_CAMERA_IDS
+            )
+
+            poses_2d = _make_view_stack(
+                camera_2d,
+                sequence_name,
+                expected_last_dim=2
+            )
+
+            # ----------------------------------------------
+            # 3D
+            #
+            # Use camera0 as GT.
+            # ----------------------------------------------
+
+            gt_3d = _get_camera_positions(
+                dataset,
+                sequence_name,
+                GT_CAMERA_ID
+            )
+
+            # ----------------------------------------------
+            # Synchronize frame count
+            # ----------------------------------------------
+
+            lengths = [
+                poses_2d.shape[0],
+                gt_3d.shape[0]
+            ]
+
+            min_length = min(
+                lengths
+            )
+
+            poses_2d = poses_2d[
+                :min_length
+            ]
+
+            gt_3d = gt_3d[
+                :min_length
+            ]
+
+            # ----------------------------------------------
+            # Dummy image features
+            # ----------------------------------------------
+
+            if USE_DUMMY_IMAGE_FEATURES:
+
+                image_features = np.zeros(
+                    (
+                        min_length,
+                        len(
+                            BELIEF_CAMERA_IDS
+                        ),
+                        DUMMY_IMAGE_FEATURE_DIM
+                    ),
                     dtype=np.float32
                 )
 
-                camera_arrays.append(
-                    arr
+            else:
+
+                raise RuntimeError(
+                    "Real image features are not configured."
                 )
-
-            converted_keypoints[
-                sequence_name
-            ] = camera_arrays
-
-        # ----------------------------------------------------
-        # Build dummy image features
-        # ----------------------------------------------------
-
-        img = {}
-
-        for sequence_name in converted_keypoints:
-
-            camera_arrays = (
-                converted_keypoints[
-                    sequence_name
-                ]
-            )
-
-            # All cameras must have the same number
-            # of frames.
-            frame_count = min(
-                arr.shape[0]
-                for arr in camera_arrays
-            )
-
-            img[
-                sequence_name
-            ] = []
-
-            for _ in BELIEF_CAMERA_IDS:
-
-                img[
-                    sequence_name
-                ].append(
-                    np.zeros(
-                        (
-                            frame_count,
-                            DUMMY_IMAGE_FEATURE_DIM
-                        ),
-                        dtype=np.float32
-                    )
-                )
-
-        # ----------------------------------------------------
-        # Synchronize with 3D data
-        # ----------------------------------------------------
-
-        for sequence_name in list(
-            converted_keypoints.keys()
-        ):
-
-            if sequence_name not in dataset:
-
-                del converted_keypoints[
-                    sequence_name
-                ]
-
-                del img[
-                    sequence_name
-                ]
-
-                continue
-
-            positions_3d = (
-                dataset[
-                    sequence_name
-                ][
-                    "positions"
-                ]
-            )
-
-            mocap_length = (
-                positions_3d.shape[0]
-            )
-
-            # Determine shortest modality
-            min_len = mocap_length
-
-            for arr in converted_keypoints[
-                sequence_name
-            ]:
-
-                min_len = min(
-                    min_len,
-                    arr.shape[0]
-                )
-
-            for arr in img[
-                sequence_name
-            ]:
-
-                min_len = min(
-                    min_len,
-                    arr.shape[0]
-                )
-
-            # ------------------------------------------------
-            # Truncate 3D
-            # ------------------------------------------------
-
-            dataset[
-                sequence_name
-            ][
-                "positions"
-            ] = dataset[
-                sequence_name
-            ][
-                "positions"
-            ][:min_len]
-
-            # ------------------------------------------------
-            # Truncate 2D
-            # ------------------------------------------------
-
-            for cam_idx in range(
-                len(
-                    converted_keypoints[
-                        sequence_name
-                    ]
-                )
-            ):
-
-                converted_keypoints[
-                    sequence_name
-                ][cam_idx] = (
-                    converted_keypoints[
-                        sequence_name
-                    ][cam_idx
-                    ][:min_len]
-                )
-
-            # ------------------------------------------------
-            # Truncate dummy image features
-            # ------------------------------------------------
-
-            for cam_idx in range(
-                len(
-                    img[
-                        sequence_name
-                    ]
-                )
-            ):
-
-                img[
-                    sequence_name
-                ][cam_idx] = (
-                    img[
-                        sequence_name
-                    ][cam_idx
-                    ][:min_len]
-                )
-
-        # ----------------------------------------------------
-        # Convert to DSVTformer format
-        # ----------------------------------------------------
-
-        for sequence_name in list(
-            converted_keypoints.keys()
-        ):
 
             # ----------------------------------------------
-            # 2D:
+            # Store
             #
-            # (T,4,17,2)
-            # ----------------------------------------------
-
-            positions_2d = np.stack(
-                converted_keypoints[
-                    sequence_name
-                ],
-                axis=1
-            ).astype(
-                np.float32
-            )
-
-            # ----------------------------------------------
-            # Dummy features:
+            # Internal key is:
             #
-            # (T,4,F)
+            # (sequence_name, "default")
+            #
+            # This avoids treating video IDs as H36M
+            # subjects.
             # ----------------------------------------------
 
-            image_features = np.stack(
-                img[
-                    sequence_name
-                ],
-                axis=1
-            ).astype(
-                np.float32
+            seq_key = (
+                sequence_name,
+                "default"
             )
 
-            converted_keypoints[
-                sequence_name
-            ] = positions_2d
+            converted_2d[
+                seq_key
+            ] = poses_2d
 
-            img[
-                sequence_name
+            converted_images[
+                seq_key
             ] = image_features
 
-        # ----------------------------------------------------
-        # Store converted structures
-        # ----------------------------------------------------
-
-        self._belief_keypoints = (
-            converted_keypoints
-        )
-
-        self._belief_images = img
+            # ----------------------------------------------
+            # Store GT separately.
+            # ----------------------------------------------
 
         # ----------------------------------------------------
-        # Print diagnostic information
+        # 3D output
+        # ----------------------------------------------------
+
+        converted_3d = {}
+
+        for seq_key in converted_2d.keys():
+
+            sequence_name = seq_key[0]
+
+            gt_3d = _get_camera_positions(
+                dataset,
+                sequence_name,
+                GT_CAMERA_ID
+            )
+
+            min_length = min(
+                gt_3d.shape[0],
+                converted_2d[
+                    seq_key
+                ].shape[0]
+            )
+
+            converted_3d[
+                seq_key
+            ] = gt_3d[
+                :min_length
+            ].astype(
+                np.float32
+            )
+
+            converted_2d[
+                seq_key
+            ] = converted_2d[
+                seq_key
+            ][:min_length]
+
+            converted_images[
+                seq_key
+            ] = converted_images[
+                seq_key
+            ][:min_length]
+
+        # ----------------------------------------------------
+        # Diagnostics
         # ----------------------------------------------------
 
         print(
@@ -1416,7 +1710,7 @@ class Fusion(data.Dataset):
         )
 
         print(
-            "BELIEF DATASET PREPARATION"
+            "BELIEF DATASET PREPARATION COMPLETE"
         )
 
         print(
@@ -1424,39 +1718,51 @@ class Fusion(data.Dataset):
         )
 
         print(
-            "Sequences available:",
-            len(converted_keypoints)
-        )
-
-        print(
-            "Selected cameras:",
+            "Selected input cameras:",
             BELIEF_CAMERA_IDS
         )
 
-        if len(converted_keypoints) > 0:
+        print(
+            "3D GT camera:",
+            GT_CAMERA_ID
+        )
 
-            first_seq = next(
+        print(
+            "Sequences:",
+            len(converted_2d)
+        )
+
+        if len(converted_2d) > 0:
+
+            first_key = next(
                 iter(
-                    converted_keypoints
+                    converted_2d
                 )
             )
 
             print(
-                "Example sequence:",
-                first_seq
+                "\nFirst sequence:",
+                first_key
             )
 
             print(
                 "2D shape:",
-                converted_keypoints[
-                    first_seq
+                converted_2d[
+                    first_key
+                ].shape
+            )
+
+            print(
+                "3D shape:",
+                converted_3d[
+                    first_key
                 ].shape
             )
 
             print(
                 "Image feature shape:",
-                img[
-                    first_seq
+                converted_images[
+                    first_key
                 ].shape
             )
 
@@ -1464,9 +1770,21 @@ class Fusion(data.Dataset):
             "=" * 70
         )
 
+        self._belief_keypoints = (
+            converted_2d
+        )
+
+        self._belief_images = (
+            converted_images
+        )
+
+        self._belief_3d = (
+            converted_3d
+        )
+
         return (
-            converted_keypoints,
-            img
+            converted_2d,
+            converted_images
         )
 
     # ========================================================
@@ -1486,199 +1804,225 @@ class Fusion(data.Dataset):
 
         out_images = {}
 
-        out_camera_params = {}
+        out_camera_params = None
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # For belief data, "subjects" from opt may contain
-        # H36M IDs such as:
-        #
-        #     8
-        #     9
-        #     11
-        #
-        # Those do not exist in the belief dataset.
-        #
-        # Therefore we use all sequences available in the
-        # prepared belief data.
-        # ----------------------------------------------------
-
-        sequence_names = (
-            list(
-                self._belief_keypoints.keys()
-            )
+        all_keys = list(
+            self._belief_keypoints.keys()
         )
 
         # ----------------------------------------------------
-        # Optional split handling
-        #
-        # If opt.subjects_train/test contains actual belief
-        # sequence names, use them.
-        #
-        # Otherwise use all sequences.
+        # Requested filters
         # ----------------------------------------------------
 
         requested = set(
             str(x).strip()
             for x in subjects
+            if str(x).strip()
         )
 
-        use_requested_filter = False
+        # ----------------------------------------------------
+        # IMPORTANT
+        #
+        # Original main_img.py uses:
+        #
+        # subjects_train = 8
+        # subjects_test  = 9,11
+        #
+        # Those are H36M subject IDs.
+        #
+        # Your belief dataset instead has:
+        #
+        # video_0_seg_1
+        #
+        # video_1_seg_1
+        #
+        # etc.
+        #
+        # Therefore:
+        #
+        # If the requested list contains actual belief
+        # sequence names or video IDs, filter them.
+        #
+        # Otherwise we use all sequences.
+        # ----------------------------------------------------
 
-        for sequence_name in sequence_names:
+        explicit_belief_filter = False
 
-            video_part = (
-                sequence_name.split("_")[1]
-                if sequence_name.startswith(
-                    "video_"
-                )
-                else None
-            )
+        for key in all_keys:
+
+            sequence_name = key[0]
 
             if (
                 sequence_name in requested
-                or video_part in requested
             ):
-
-                use_requested_filter = True
-
+                explicit_belief_filter = True
                 break
 
+            if sequence_name.startswith(
+                "video_"
+            ):
+
+                parts = sequence_name.split("_")
+
+                if len(parts) >= 2:
+
+                    video_id = parts[1]
+
+                    if video_id in requested:
+
+                        explicit_belief_filter = True
+                        break
+
         # ----------------------------------------------------
-        # Build outputs
+        # Iterate
         # ----------------------------------------------------
 
-        for sequence_name in sequence_names:
+        for seq_key in all_keys:
+
+            sequence_name = seq_key[0]
 
             # ----------------------------------------------
-            # Filter only if the user explicitly supplied
-            # matching belief IDs.
+            # Optional filter
             # ----------------------------------------------
 
-            if use_requested_filter:
+            if explicit_belief_filter:
 
-                video_id = (
-                    sequence_name.split("_")[1]
+                matches = (
+                    sequence_name
+                    in requested
                 )
 
-                if (
-                    sequence_name not in requested
-                    and video_id not in requested
+                if sequence_name.startswith(
+                    "video_"
                 ):
 
+                    parts = sequence_name.split("_")
+
+                    if len(parts) >= 2:
+
+                        video_id = parts[1]
+
+                        matches = (
+                            matches
+                            or
+                            video_id in requested
+                        )
+
+                if not matches:
                     continue
 
             # ----------------------------------------------
-            # Convert sequence:
-            #
-            # video_0_seg_1
-            #
-            # ->
-            #
-            # subject = video_0
-            # action  = seg_1
-            # ----------------------------------------------
-
-            subject, action = (
-                _extract_sequence_id(
-                    sequence_name
-                )
-            )
-
-            seq_key = (
-                subject,
-                action
-            )
-
-            # ----------------------------------------------
-            # 2D
+            # Data
             # ----------------------------------------------
 
             out_poses_2d[
                 seq_key
             ] = self._belief_keypoints[
-                sequence_name
+                seq_key
             ]
-
-            # ----------------------------------------------
-            # Dummy image features
-            # ----------------------------------------------
 
             out_images[
                 seq_key
             ] = self._belief_images[
-                sequence_name
+                seq_key
             ]
-
-            # ----------------------------------------------
-            # 3D
-            #
-            # dataset structure may be either:
-            #
-            # dataset[sequence_name]
-            #
-            # or:
-            #
-            # dataset[subject][action]
-            # ----------------------------------------------
-
-            if sequence_name in dataset:
-
-                positions = (
-                    dataset[
-                        sequence_name
-                    ][
-                        "positions"
-                    ]
-                )
-
-            elif (
-                subject in dataset
-                and action in dataset[
-                    subject
-                ]
-            ):
-
-                positions = (
-                    dataset[
-                        subject
-                    ][
-                        action
-                    ][
-                        "positions"
-                    ]
-                )
-
-            else:
-
-                raise KeyError(
-                    f"Could not find 3D data for "
-                    f"{sequence_name}"
-                )
 
             out_poses_3d[
                 seq_key
-            ] = np.asarray(
-                positions,
-                dtype=np.float32
-            )
-
-            # ------------------------------------------------
-            # Camera parameters
-            #
-            # Not available for belief dataset.
-            # ------------------------------------------------
-
-            # We intentionally leave this empty.
+            ] = self._belief_3d[
+                seq_key
+            ]
 
         # ----------------------------------------------------
-        # Convert camera params
+        # Subset
         # ----------------------------------------------------
 
-        if len(out_camera_params) == 0:
+        if subset is not None:
 
-            out_camera_params = None
+            subset = float(subset)
+
+            if (
+                0 < subset < 1
+            ):
+
+                rng = np.random.RandomState(
+                    1234
+                )
+
+                for key in list(
+                    out_poses_3d.keys()
+                ):
+
+                    n = out_poses_3d[
+                        key
+                    ].shape[0]
+
+                    keep = max(
+                        1,
+                        int(
+                            n * subset
+                        )
+                    )
+
+                    indices = rng.choice(
+                        n,
+                        keep,
+                        replace=False
+                    )
+
+                    indices.sort()
+
+                    out_poses_3d[
+                        key
+                    ] = out_poses_3d[
+                        key
+                    ][indices]
+
+                    out_poses_2d[
+                        key
+                    ] = out_poses_2d[
+                        key
+                    ][indices]
+
+                    out_images[
+                        key
+                    ] = out_images[
+                        key
+                    ][indices]
+
+        # ----------------------------------------------------
+        # Downsample
+        # ----------------------------------------------------
+
+        if self.downsample > 1:
+
+            for key in list(
+                out_poses_3d.keys()
+            ):
+
+                out_poses_3d[
+                    key
+                ] = out_poses_3d[
+                    key
+                ][
+                    ::self.downsample
+                ]
+
+                out_poses_2d[
+                    key
+                ] = out_poses_2d[
+                    key
+                ][
+                    ::self.downsample
+                ]
+
+                out_images[
+                    key
+                ] = out_images[
+                    key
+                ][
+                    ::self.downsample
+                ]
 
         # ----------------------------------------------------
         # Diagnostics
@@ -1690,11 +2034,16 @@ class Fusion(data.Dataset):
         )
 
         print(
-            "FETCHED DATA"
+            "FETCH"
         )
 
         print(
-            "Sequences:",
+            "Requested:",
+            list(subjects)
+        )
+
+        print(
+            "Selected sequences:",
             len(out_poses_3d)
         )
 
@@ -1726,7 +2075,7 @@ class Fusion(data.Dataset):
             )
 
             print(
-                "Image features:",
+                "Images:",
                 out_images[
                     first_key
                 ].shape
@@ -1763,7 +2112,7 @@ class Fusion(data.Dataset):
     ):
 
         (
-            seq_name,
+            seq_key,
             start_3d,
             end_3d,
             flip,
@@ -1774,92 +2123,178 @@ class Fusion(data.Dataset):
 
         (
             cam,
-            gt_3D,
-            input_2D,
+            gt_3d,
+            input_2d,
             images,
             action,
             subject,
             low_2d,
             high_2d
         ) = self.generator.get_batch(
-            seq_name,
+            seq_key,
             start_3d,
             end_3d,
-            False,
-            False,
-            False
+            mask=False,
+            flip=flip,
+            reverse=reverse
         )
+
+        # ----------------------------------------------------
+        # Mirror augmentation
+        # ----------------------------------------------------
+
+        if flip:
+
+            input_2d = input_2d.copy()
+
+            # x-coordinate reflection
+            input_2d[
+                ...,
+                0
+            ] *= -1
+
+            if (
+                self.kps_left is not None
+                and
+                self.kps_right is not None
+            ):
+
+                input_2d[
+                    :,
+                    :,
+                    self.kps_left
+                    +
+                    self.kps_right,
+                    :
+                ] = input_2d[
+                    :,
+                    :,
+                    self.kps_right
+                    +
+                    self.kps_left,
+                    :
+                ]
+
+            if gt_3d is not None:
+
+                gt_3d = gt_3d.copy()
+
+                gt_3d[
+                    ...,
+                    0
+                ] *= -1
+
+                if (
+                    self.joints_left is not None
+                    and
+                    self.joints_right is not None
+                ):
+
+                    gt_3d[
+                        :,
+                        self.joints_left
+                        +
+                        self.joints_right,
+                        :
+                    ] = gt_3d[
+                        :,
+                        self.joints_right
+                        +
+                        self.joints_left,
+                        :
+                    ]
+
+        # ----------------------------------------------------
+        # Reverse temporal order
+        # ----------------------------------------------------
+
+        if reverse:
+
+            input_2d = input_2d[
+                ::-1
+            ].copy()
+
+            images = images[
+                ::-1
+            ].copy()
+
+            if gt_3d is not None:
+
+                gt_3d = gt_3d[
+                    ::-1
+                ].copy()
 
         # ----------------------------------------------------
         # Test augmentation
         # ----------------------------------------------------
 
         if (
-            self.train == False
+            not self.train
             and self.test_aug
         ):
 
-            (
-                _,
-                _,
-                input_2D_aug,
-                images_aug,
-                _,
-                _,
-                low_2d,
-                high_2d
-            ) = self.generator.get_batch(
-                seq_name,
-                start_3d,
-                end_3d,
-                mask=False,
-                flip=False,
-                reverse=False
-            )
+            input_2d_aug = input_2d.copy()
 
-            input_2D = np.concatenate(
-                (
-                    np.expand_dims(
-                        input_2D,
-                        axis=0
-                    ),
-                    np.expand_dims(
-                        input_2D_aug,
-                        axis=0
-                    )
-                ),
+            input_2d_aug[
+                ...,
+                0
+            ] *= -1
+
+            images_aug = images.copy()
+
+            if (
+                self.kps_left is not None
+                and
+                self.kps_right is not None
+            ):
+
+                input_2d_aug[
+                    :,
+                    :,
+                    self.kps_left
+                    +
+                    self.kps_right,
+                    :
+                ] = input_2d_aug[
+                    :,
+                    :,
+                    self.kps_right
+                    +
+                    self.kps_left,
+                    :
+                ]
+
+            input_2d = np.stack(
+                [
+                    input_2d,
+                    input_2d_aug
+                ],
                 axis=0
             )
 
-            images = np.concatenate(
-                (
-                    np.expand_dims(
-                        images,
-                        axis=0
-                    ),
-                    np.expand_dims(
-                        images_aug,
-                        axis=0
-                    )
-                ),
+            images = np.stack(
+                [
+                    images,
+                    images_aug
+                ],
                 axis=0
             )
 
         # ----------------------------------------------------
         # Bounding box
+        #
+        # Belief data does not contain a detector bounding box.
+        # Use normalized full-frame box.
         # ----------------------------------------------------
 
         bb_box = np.array(
-            [0, 0, 1, 1],
+            [
+                0.0,
+                0.0,
+                1.0,
+                1.0
+            ],
             dtype=np.float32
-        )
-
-        input_2D_update = (
-            input_2D
-        )
-
-        images_update = (
-            images
         )
 
         scale = np.float64(
@@ -1867,14 +2302,14 @@ class Fusion(data.Dataset):
         )
 
         # ----------------------------------------------------
-        # Return EXACTLY the interface expected by main_img.py
+        # Return interface expected by main_img.py
         # ----------------------------------------------------
 
         return (
             cam,
-            gt_3D,
-            input_2D_update,
-            images_update,
+            gt_3d,
+            input_2d,
+            images,
             action,
             subject,
             scale,
