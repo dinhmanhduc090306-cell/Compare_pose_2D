@@ -916,7 +916,10 @@ class ChunkedGenerator:
         # The belief dataset does not contain calibration
         # parameters compatible with the original H36M camera
         # object.
-        camera_output = None
+        camera_output = np.zeros(
+            9,
+            dtype=np.float32
+        )
 
         if seq_3d is not None:
 
@@ -933,7 +936,10 @@ class ChunkedGenerator:
 
         return (
             camera_output,
-            None,
+            np.zeros(
+                (0,),
+                dtype=np.float32
+            ),
             self.batch_2d.copy(),
             self.batch_images.copy(),
             seq_key[1],
