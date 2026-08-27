@@ -1,266 +1,315 @@
-import numpy as np
-import copy
-import os
-import pickle
-
-from common.cameras import h36m_cameras_intrinsic_params, h36m_cameras_extrinsic_params,\
-    normalize_screen_coordinates
-
-class Skeleton:
-
-    def __init__(self, parents, joints_left, joints_right):
-        assert len(joints_left) == len(joints_right)
-
-        self._parents = np.array(parents)
-        self._joints_left = joints_left
-        self._joints_right = joints_right
-        self._compute_metadata()
-
-    def num_joints(self):
-        return len(self._parents)
-
-    def parents(self):
-        return self._parents
-
-    def has_children(self):
-        return self._has_children
-
-    def children(self):
-        return self._children
-
-    def remove_joints(self, joints_to_remove):
-
-        valid_joints = []
-        for joint in range(len(self._parents)):
-            if joint not in joints_to_remove:
-                valid_joints.append(joint)
-
-        for i in range(len(self._parents)):
-            while self._parents[i] in joints_to_remove:
-                self._parents[i] = self._parents[self._parents[i]]
-
-        index_offsets = np.zeros(len(self._parents), dtype=int)
-        new_parents = []
-        for i, parent in enumerate(self._parents):
-            if i not in joints_to_remove:
-                new_parents.append(parent - index_offsets[parent])
-            else:
-                index_offsets[i:] += 1
-        self._parents = np.array(new_parents)
-
-        if self._joints_left is not None:
-            new_joints_left = []
-            for joint in self._joints_left:
-                if joint in valid_joints:
-                    new_joints_left.append(joint - index_offsets[joint])
-            self._joints_left = new_joints_left
-        if self._joints_right is not None:
-            new_joints_right = []
-            for joint in self._joints_right:
-                if joint in valid_joints:
-                    new_joints_right.append(joint - index_offsets[joint])
-            self._joints_right = new_joints_right
-
-        self._compute_metadata()
-
-        return valid_joints
-
-    def joints_left(self):
-        return self._joints_left
-
-    def joints_right(self):
-        return self._joints_right
-
-    def _compute_metadata(self):
-        self._has_children = np.zeros(len(self._parents)).astype(bool)
-        for i, parent in enumerate(self._parents):
-            if parent != -1:
-                self._has_children[parent] = True
-
-        self._children = []
-        for i, parent in enumerate(self._parents):
-            self._children.append([])
-        for i, parent in enumerate(self._parents):
-            if parent != -1:
-                self._children[parent].append(i)
-
-h36m_skeleton = Skeleton(parents=[-1, 0, 1, 2, 3, 4, 0, 6, 7, 8, 9, 0, 11, 12, 13, 14, 12,
-                                  16, 17, 18, 19, 20, 19, 22, 12, 24, 25, 26, 27, 28, 27, 30],
-                         joints_left=[6, 7, 8, 9, 10, 16, 17, 18, 19, 20, 21, 22, 23],
-                         joints_right=[1, 2, 3, 4, 5, 24, 25, 26, 27, 28, 29, 30, 31])
-
-class MocapDataset:
-    def __init__(self, fps, skeleton):
-        self._skeleton = skeleton
-        self._fps = fps
-        self._data = None
-        self._cameras = None
-
-    def remove_joints(self, joints_to_remove):
-        kept_joints = self._skeleton.remove_joints(joints_to_remove)
-        for subject in self._data.keys():
-            for action in self._data[subject].keys():
-                s = self._data[subject][action]
-                s['positions'] = s['positions'][:, kept_joints]
-
-    def __getitem__(self, key):
-        return self._data[key]
-
-    def subjects(self):
-        return self._data.keys()
-
-    def fps(self):
-        return self._fps
-
-    def skeleton(self):
-        return self._skeleton
-
-    def cameras(self):
-        return self._cameras
-
-    def supports_semi_supervised(self):
-        return False
-
 class Human36mDataset(MocapDataset):
-    def __init__(self, path, opt, remove_static_joints=False): # Set default to False
-        # Use a simplified 17-joint skeleton if your data is already pre-processed
-        super().__init__(fps=50, skeleton=h36m_skeleton)
-        
-        self.train_list = ['1', '5', '6', '7', '8']
-        self.test_list = ['9', '11']
 
-        # 1. Process Cameras
-        self._cameras = copy.deepcopy(h36m_cameras_extrinsic_params)
-        for cameras in self._cameras.values():
-            for i, cam in enumerate(cameras):
-                cam.update(h36m_cameras_intrinsic_params[i])
-                for k, v in cam.items():
-                    if k not in ['id', 'res_w', 'res_h']:
-                        cam[k] = np.array(v, dtype='float32')
+    def __init__(self, path, opt, remove_static_joints=False):
+        """
+        Loader for the converted belief_data dataset.
 
-                if opt.crop_uv == 0:
-                    cam['center'] = normalize_screen_coordinates(cam['center'], w=cam['res_w'], h=cam['res_h']).astype('float32')
-                    cam['focal_length'] = cam['focal_length'] / cam['res_w'] * 2
+        Expected NPZ structure:
 
-                if 'translation' in cam:
-                    cam['translation'] = cam['translation'] / 1000
+        positions_3d
+        └── video_X_seg_Y
+            ├── camera0 -> (T, 17, 3)
+            ├── camera1 -> (T, 17, 3)
+            ├── ...
+            └── camera8 -> (T, 17, 3)
 
-                cam['intrinsic'] = np.concatenate((cam['focal_length'],
-                                                   cam['center'],
-                                                   cam['radial_distortion'],
-                                                   cam['tangential_distortion']))
+        This is NOT the original Human3.6M structure.
+        Therefore each video segment is treated as an action/sequence.
+        """
 
-        data = np.load(path, allow_pickle=True)['positions_3d'].item()
+        super().__init__(
+            fps=50,
+            skeleton=h36m_skeleton
+        )
+
+        # --------------------------------------------------
+        # IMPORTANT
+        # --------------------------------------------------
+        # Your data contains video IDs, NOT H36M subjects.
+        #
+        # We use:
+        #
+        # video_0_seg_1
+        #
+        # as a sequence name.
+        #
+        # The original H36M train/test subject lists cannot
+        # be used directly.
+        # --------------------------------------------------
+
+        self.train_list = []
+        self.test_list = []
+
+        # --------------------------------------------------
+        # Load the converted dataset
+        # --------------------------------------------------
+
+        print()
+        print("=" * 70)
+        print("Loading belief_data 3D dataset")
+        print("=" * 70)
+
+        npz = np.load(
+            path,
+            allow_pickle=True
+        )
+
+        if 'positions_3d' not in npz:
+            raise KeyError(
+                "NPZ does not contain 'positions_3d'"
+            )
+
+        raw_data = npz['positions_3d'].item()
+
+        print(
+            f"Found {len(raw_data)} sequences"
+        )
+
+        # --------------------------------------------------
+        # Inspect structure
+        # --------------------------------------------------
+
+        first_key = next(iter(raw_data))
+
+        print(
+            f"First sequence: {first_key}"
+        )
+
+        print(
+            f"First sequence type: "
+            f"{type(raw_data[first_key])}"
+        )
+
+        # --------------------------------------------------
+        # Build a camera representation
+        # --------------------------------------------------
+        #
+        # Your dataset has 9 cameras:
+        #
+        # camera0 ... camera8
+        #
+        # These are NOT Human3.6M cameras.
+        #
+        # We therefore create lightweight camera metadata
+        # instead of using h36m_cameras_extrinsic_params.
+        # --------------------------------------------------
+
+        self._cameras = {}
+
+        # --------------------------------------------------
+        # Convert:
+        #
+        # video_0_seg_1
+        #
+        # into:
+        #
+        # self._data[sequence]
+        #      ['positions']
+        #      ['cameras']
+        #
+        # --------------------------------------------------
 
         self._data = {}
-        for subject, actions in data.items():
-            self._data[subject] = {}
-            for action_name, positions in actions.items():
-                self._data[subject][action_name] = {
-                    'positions': positions,
-                    'cameras': self._cameras[subject],
+
+        for sequence_name, sequence_data in raw_data.items():
+
+            if not isinstance(sequence_data, dict):
+                print(
+                    f"[WARNING] Skipping {sequence_name}: "
+                    f"expected dict, got "
+                    f"{type(sequence_data)}"
+                )
+                continue
+
+            self._data[sequence_name] = {}
+
+            # --------------------------------------------------
+            # Determine available cameras
+            # --------------------------------------------------
+
+            camera_names = sorted(
+                sequence_data.keys(),
+                key=lambda x: int(
+                    x.replace("camera", "")
+                )
+                if x.startswith("camera")
+                else 999
+            )
+
+            if len(camera_names) == 0:
+                print(
+                    f"[WARNING] No cameras found "
+                    f"for {sequence_name}"
+                )
+                continue
+
+            # --------------------------------------------------
+            # Build camera metadata
+            # --------------------------------------------------
+
+            cameras = []
+
+            for camera_name in camera_names:
+
+                positions = sequence_data[camera_name]
+
+                if not isinstance(
+                    positions,
+                    np.ndarray
+                ):
+                    positions = np.asarray(
+                        positions,
+                        dtype=np.float32
+                    )
+
+                positions = positions.astype(
+                    np.float32
+                )
+
+                if positions.ndim != 3:
+                    print(
+                        f"[WARNING] {sequence_name}/"
+                        f"{camera_name} has shape "
+                        f"{positions.shape}; "
+                        f"expected (T,17,3)"
+                    )
+                    continue
+
+                # ----------------------------------------------
+                # Camera information
+                #
+                # These are placeholders because your JSON
+                # contains 3D camera-space coordinates but does
+                # not contain H36M calibration parameters.
+                # ----------------------------------------------
+
+                cam = {
+                    'id': camera_name,
+                    'res_w': 288,
+                    'res_h': 384,
+
+                    # Normalized camera center
+                    'center': np.array(
+                        [0.0, 0.0],
+                        dtype=np.float32
+                    ),
+
+                    # Placeholder focal length
+                    'focal_length': np.array(
+                        [1.0, 1.0],
+                        dtype=np.float32
+                    ),
+
+                    'radial_distortion': np.zeros(
+                        3,
+                        dtype=np.float32
+                    ),
+
+                    'tangential_distortion': np.zeros(
+                        2,
+                        dtype=np.float32
+                    ),
+
+                    'translation': np.zeros(
+                        3,
+                        dtype=np.float32
+                    ),
+
+                    'intrinsic': np.array(
+                        [
+                            1.0,
+                            1.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                        ],
+                        dtype=np.float32
+                    )
                 }
 
-        if remove_static_joints:
-            self.remove_joints([4, 5, 9, 10, 11, 16, 20, 21, 22, 23, 24, 28, 29, 30, 31])
+                cameras.append(cam)
 
-            self._skeleton._parents[11] = 8
-            self._skeleton._parents[14] = 8
+            # --------------------------------------------------
+            # Store camera list
+            # --------------------------------------------------
+
+            self._cameras[
+                sequence_name
+            ] = cameras
+
+            # --------------------------------------------------
+            # The rest of the project expects:
+            #
+            # subject
+            #    action
+            #       positions
+            #
+            # We use the sequence itself as subject and
+            # "default" as its action.
+            # --------------------------------------------------
+
+            self._data[
+                sequence_name
+            ]['default'] = {
+                'positions': sequence_data,
+                'cameras': cameras
+            }
+
+        # --------------------------------------------------
+        # Create train/test lists
+        # --------------------------------------------------
+        #
+        # Since this is belief_data and not H36M, use all
+        # sequences for testing unless main_img.py explicitly
+        # supplies another split.
+        # --------------------------------------------------
+
+        sequences = list(
+            self._data.keys()
+        )
+
+        self.train_list = sequences
+        self.test_list = sequences
+
+        # --------------------------------------------------
+        # Print summary
+        # --------------------------------------------------
+
+        print()
+        print(
+            f"Loaded sequences: "
+            f"{len(self._data)}"
+        )
+
+        if len(sequences) > 0:
+
+            print(
+                "Example sequences:"
+            )
+
+            for seq in sequences[:5]:
+
+                print(
+                    f"  {seq}"
+                )
+
+                cameras = self._data[
+                    seq
+                ]['default']['cameras']
+
+                print(
+                    f"    cameras: "
+                    f"{len(cameras)}"
+                )
+
+        print(
+            "=" * 70
+        )
+        print()
 
     def supports_semi_supervised(self):
         return True
-
-
-class AP3DDataset(MocapDataset):
-    """
-    AP3D dataset loader for cross-dataset evaluation.
-    Uses 2-view camera data padded to 4 views: [cam_A, cam_B, cam_A, cam_B].
-    Only S1 (figure skating) has multi-view data.
-    """
-
-    # 17-joint skeleton matching H36M format
-    ap3d_skeleton = Skeleton(
-        parents=[-1, 0, 1, 2, 3, 4, 0, 6, 7, 8, 9, 0, 11, 12, 13, 14, 12,
-                 16, 17, 18, 19, 20, 19, 22, 12, 24, 25, 26, 27, 28, 27, 30],
-        joints_left=[6, 7, 8, 9, 10, 16, 17, 18, 19, 20, 21, 22, 23],
-        joints_right=[1, 2, 3, 4, 5, 24, 25, 26, 27, 28, 29, 30, 31]
-    )
-
-    def __init__(self, path, opt, remove_static_joints=False):
-        super().__init__(fps=50, skeleton=AP3DDataset.ap3d_skeleton)
-
-        self.train_list = []  # No training on AP3D
-        self.test_list = ['S1', 'S2', 'S3']
-
-        # Load pre-padded camera params (from prepare_ap3d_dataset.py)
-        cam_params_path = os.path.join(os.path.dirname(path), 'ap3d_cameras.pkl')
-        with open(cam_params_path, 'rb') as f:
-            ap3d_cameras = pickle.load(f)
-
-        # Process cameras
-        self._cameras = copy.deepcopy(ap3d_cameras)
-        for subject, subject_cameras in self._cameras.items():
-            if isinstance(subject_cameras, dict):
-                for action_name, cameras in subject_cameras.items():
-                    for i, cam in enumerate(cameras):
-                        for k, v in cam.items():
-                            if k not in ['id', 'res_w', 'res_h']:
-                                cam[k] = np.array(v, dtype='float32')
-
-                        if opt.crop_uv == 0:
-                            cam['center'] = normalize_screen_coordinates(
-                                cam['center'], w=cam['res_w'], h=cam['res_h']
-                            ).astype('float32')
-                            cam['focal_length'] = cam['focal_length'] / cam['res_w'] * 2
-
-                        if 'translation' in cam:
-                            cam['translation'] = cam['translation'] / 1000
-
-                        cam['intrinsic'] = np.concatenate((
-                            cam['focal_length'],
-                            cam['center'],
-                            cam['radial_distortion'],
-                            cam['tangential_distortion']
-                        ))
-            else:
-                for i, cam in enumerate(subject_cameras):
-                    for k, v in cam.items():
-                        if k not in ['id', 'res_w', 'res_h']:
-                            cam[k] = np.array(v, dtype='float32')
-
-                    if opt.crop_uv == 0:
-                        cam['center'] = normalize_screen_coordinates(
-                            cam['center'], w=cam['res_w'], h=cam['res_h']
-                        ).astype('float32')
-                        cam['focal_length'] = cam['focal_length'] / cam['res_w'] * 2
-
-                    if 'translation' in cam:
-                        cam['translation'] = cam['translation'] / 1000
-
-                    cam['intrinsic'] = np.concatenate((
-                        cam['focal_length'],
-                        cam['center'],
-                        cam['radial_distortion'],
-                        cam['tangential_distortion']
-                    ))
-
-        # Load 3D data
-        data = np.load(path, allow_pickle=True)['positions_3d'].item()
-
-        self._data = {}
-        for subject, actions in data.items():
-            self._data[subject] = {}
-            for action_name, positions in actions.items():
-                self._data[subject][action_name] = {
-                    'positions': positions,
-                    'cameras': self._cameras[subject][action_name] if isinstance(self._cameras[subject], dict) else self._cameras[subject],
-                }
-
-        if remove_static_joints:
-            self.remove_joints([4, 5, 9, 10, 11, 16, 20, 21, 22, 23, 24, 28, 29, 30, 31])
-            self._skeleton._parents[11] = 8
-            self._skeleton._parents[14] = 8
-
-    def supports_semi_supervised(self):
-        return False
-
