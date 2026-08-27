@@ -207,6 +207,9 @@ class MocapDataset:
 
         return self._data[key]
 
+    def __contains__(self, key):
+        return key in self._data
+
     def subjects(self):
 
         return self._data.keys()
