@@ -200,6 +200,14 @@ def step(
                 input_2D,
                 image
             )
+        if i == 0:
+            print("\n" + "=" * 70)
+            print("BATCH / MODEL SHAPES")
+            print("input_2D  :", input_2D.shape)
+            print("image     :", image.shape)
+            print("output_3D :", output_3D.shape)
+            print("target    :", out_target.shape)
+            print("=" * 70)
 
         elif split == 'test':
 
@@ -242,10 +250,21 @@ def step(
 
         if split == 'train':
 
+            if i == 0:
+                print("\n" + "=" * 70)
+                print("LOSS SHAPE DEBUG")
+                print("output_3D shape :", output_3D.shape)
+                print("out_target shape :", out_target.shape)
+                print("output_3D dtype  :", output_3D.dtype)
+                print("out_target dtype :", out_target.dtype)
+                print("=" * 70)
+
+
             loss = mpjpe_cal(
                 output_3D,
                 out_target
             )
+            
 
             TQDM.set_description(
                 f'Epoch [{epoch}/{opt.nepoch}]'
