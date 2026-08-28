@@ -256,7 +256,65 @@ def step(
 
         out_target[:, :, 0] = 0
 
+        # ====================================================
+        # MATCH TARGET / OUTPUT SHAPES
+        # ====================================================
         
+        if split == 'train':
+        
+            # Get dimensions FIRST
+            target_frames = out_target.shape[1]
+            output_frames = output_3D.shape[1]
+        
+            print_target_debug = (i == 0)
+        
+            if print_target_debug:
+                print("\n" + "=" * 70)
+                print("TARGET ALIGNMENT")
+                print("output_3D BEFORE :", output_3D.shape)
+                print("out_target BEFORE:", out_target.shape)
+                print("target_frames    :", target_frames)
+                print("output_frames    :", output_frames)
+                print("=" * 70)
+        
+            # ------------------------------------------------
+            # Current situation:
+            #
+            # output_3D  = [64, 27, 17, 3]
+            # out_target = [64,  1, 17, 3]
+            #
+            # Expand the single GT frame across the temporal
+            # dimension so MPJPE receives identical shapes.
+            # ------------------------------------------------
+        
+            if target_frames == 1 and output_frames > 1:
+        
+                out_target = out_target.expand(
+                    -1,
+                    output_frames,
+                    -1,
+                    -1
+                )
+        
+            # ------------------------------------------------
+            # Final safety check
+            # ------------------------------------------------
+        
+            if out_target.shape != output_3D.shape:
+        
+                raise ValueError(
+                    "\nTarget/output shape mismatch!\n"
+                    f"output_3D  : {output_3D.shape}\n"
+                    f"out_target : {out_target.shape}\n"
+                )
+        
+            if print_target_debug:
+        
+                print("\n" + "=" * 70)
+                print("TARGET ALIGNMENT AFTER FIX")
+                print("output_3D :", output_3D.shape)
+                print("out_target:", out_target.shape)
+                print("=" * 70)
 
 
         # ====================================================
