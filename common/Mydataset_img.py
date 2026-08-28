@@ -654,6 +654,13 @@ class ChunkedGenerator:
         seq_2d = self.poses_2d[seq_key]
 
         seq_img = self.images[seq_key]
+        if seq_img.ndim != 3:
+            raise ValueError(
+                f"Expected image features with shape "
+                f"(T, V, C), got {seq_img.shape} "
+                f"for sequence {seq_key}"
+            )
+        
 
         seq_3d = None
 
@@ -1363,7 +1370,6 @@ class Fusion(data.Dataset):
                     (
                         min_length,
                         len(BELIEF_CAMERA_IDS),
-                        1,
                         DUMMY_IMAGE_FEATURE_DIM
                     ),
                     dtype=np.float32
