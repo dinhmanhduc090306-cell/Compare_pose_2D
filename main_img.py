@@ -253,10 +253,8 @@ def step(
             if i == 0:
                 print("\n" + "=" * 70)
                 print("LOSS SHAPE DEBUG")
-                print("output_3D shape :", output_3D.shape)
-                print("out_target shape :", out_target.shape)
-                print("output_3D dtype  :", output_3D.dtype)
-                print("out_target dtype :", out_target.dtype)
+                print("output_3D :", output_3D.shape)
+                print("out_target:", out_target.shape)
                 print("=" * 70)
 
 
