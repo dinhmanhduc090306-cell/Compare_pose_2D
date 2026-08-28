@@ -189,17 +189,7 @@ def step(
             ]
         )
 
-        if i == 0:
-
-            print("\n" + "=" * 70)
-            print("DATA SHAPES AFTER get_varialbe()")
-            print("input_2D :", input_2D.shape)
-            print("image    :", image.shape)
-            print("gt_3D    :", gt_3D.shape)
-            print("batch_cam:", batch_cam.shape)
-            print("scale    :", scale.shape)
-            print("bb_box   :", bb_box.shape)
-            print("=" * 70)
+        
 
 
         # ====================================================
@@ -239,13 +229,7 @@ def step(
                 output_3D.detach().cpu().numpy()
             )
 
-        if i == 0:
-            print("\n" + "=" * 70)
-            print("BATCH / MODEL SHAPES")
-            print("input_2D  :", input_2D.shape)
-            print("image     :", image.shape)
-            print("output_3D :", output_3D.shape)
-            print("=" * 70)
+        
 
 
         # ====================================================
@@ -266,16 +250,7 @@ def step(
             target_frames = out_target.shape[1]
             output_frames = output_3D.shape[1]
         
-            print_target_debug = (i == 0)
-        
-            if print_target_debug:
-                print("\n" + "=" * 70)
-                print("TARGET ALIGNMENT")
-                print("output_3D BEFORE :", output_3D.shape)
-                print("out_target BEFORE:", out_target.shape)
-                print("target_frames    :", target_frames)
-                print("output_frames    :", output_frames)
-                print("=" * 70)
+            
         
             # ------------------------------------------------
             # Current situation:
@@ -308,13 +283,7 @@ def step(
                     f"out_target : {out_target.shape}\n"
                 )
         
-            if print_target_debug:
-        
-                print("\n" + "=" * 70)
-                print("TARGET ALIGNMENT AFTER FIX")
-                print("output_3D :", output_3D.shape)
-                print("out_target:", out_target.shape)
-                print("=" * 70)
+            
 
 
         # ====================================================
@@ -370,12 +339,7 @@ def step(
                     f"  out_target = {out_target.shape}"
                     )
 
-            if i == 0:
-                print("\n" + "=" * 70)
-                print("LOSS SHAPE DEBUG")
-                print("output_3D :", output_3D.shape)
-                print("out_target:", out_target.shape)
-                print("=" * 70)
+            
 
 
             loss = mpjpe_cal(
@@ -619,13 +583,7 @@ def input_augmentation(
     input_2D_non_flip = input_2D[:, 0]
     image_non_flip = image[:, 0]
 
-    print("\n" + "=" * 70)
-    print("INPUT AUGMENTATION")
-    print("input_2D original :", input_2D.shape)
-    print("image original    :", image.shape)
-    print("input_2D selected :", input_2D_non_flip.shape)
-    print("image selected    :", image_non_flip.shape)
-    print("=" * 70)
+    
 
     output_3D_non_flip = model(
         input_2D_non_flip,
