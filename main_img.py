@@ -206,7 +206,6 @@ def step(
             print("input_2D  :", input_2D.shape)
             print("image     :", image.shape)
             print("output_3D :", output_3D.shape)
-            print("target    :", out_target.shape)
             print("=" * 70)
 
         elif split == 'test':
