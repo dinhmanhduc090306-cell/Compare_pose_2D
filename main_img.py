@@ -138,7 +138,7 @@ def step(
 
         ap3d_mapping = None
 
-    key_frames_cache = {}
+        key_frames_cache = {}
 
 
     # ========================================================
@@ -189,6 +189,18 @@ def step(
             ]
         )
 
+        if i == 0:
+
+            print("\n" + "=" * 70)
+            print("DATA SHAPES AFTER get_varialbe()")
+            print("input_2D :", input_2D.shape)
+            print("image    :", image.shape)
+            print("gt_3D    :", gt_3D.shape)
+            print("batch_cam:", batch_cam.shape)
+            print("scale    :", scale.shape)
+            print("bb_box   :", bb_box.shape)
+            print("=" * 70)
+
 
         # ====================================================
         # FORWARD PASS
@@ -200,14 +212,8 @@ def step(
                 input_2D,
                 image
             )
-        if i == 0:
-            print("\n" + "=" * 70)
-            print("BATCH / MODEL SHAPES")
-            print("input_2D  :", input_2D.shape)
-            print("image     :", image.shape)
-            print("output_3D :", output_3D.shape)
-            print("=" * 70)
 
+        
         elif split == 'test':
 
             input_2D, output_3D = input_augmentation(
@@ -215,6 +221,13 @@ def step(
                 image,
                 model
             )
+        if i == 0:
+            print("\n" + "=" * 70)
+            print("BATCH / MODEL SHAPES")
+            print("input_2D  :", input_2D.shape)
+            print("image     :", image.shape)
+            print("output_3D :", output_3D.shape)
+            print("=" * 70)
 
 
             # ================================================
@@ -242,12 +255,46 @@ def step(
 
         out_target[:, :, 0] = 0
 
+        
+
 
         # ====================================================
         # TRAINING
         # ====================================================
 
         if split == 'train':
+
+            if out_target.ndim != 4:
+                    raise ValueError(
+                    f"Expected target to have 4 dimensions, "
+                    f"got {out_target.shape}"
+                    )
+
+            if output_3D.ndim != 4:
+                    raise ValueError(
+                    f"Expected output_3D to have 4 dimensions, "
+                    f"got {output_3D.shape}"
+                    )
+
+                    target_frames = out_target.shape[1]
+                    output_frames = output_3D.shape[1]
+
+            if target_frames == 1 and output_frames > 1:
+
+                    out_target = out_target.expand(
+                        -1,
+                        output_frames,
+                        -1,
+                        -1
+                    )
+
+            elif target_frames != output_frames:
+
+                    raise ValueError(
+                    "Temporal dimension mismatch:\n"
+                    f"  output_3D  = {output_3D.shape}\n"
+                    f"  out_target = {out_target.shape}"
+                    )
 
             if i == 0:
                 print("\n" + "=" * 70)
