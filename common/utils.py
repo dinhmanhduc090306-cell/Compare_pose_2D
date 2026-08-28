@@ -95,49 +95,162 @@ def test_calculation(predicted, target, action, error_sum, data_type, subject, v
 
 def mpjpe_by_action_p1(predicted, target, action, action_error_sum, valid_mask=None):
     assert predicted.shape == target.shape
+
     num = predicted.size(0)
-    dist = torch.mean(torch.norm(predicted - target, dim=len(target.shape) - 1), dim=len(target.shape) - 2)
-    dist_joints = torch.mean(torch.norm(predicted - target, dim=len(target.shape) - 1), dim=len(target.shape) - 3)
+
+    dist = torch.mean(
+        torch.norm(
+            predicted - target,
+            dim=len(target.shape) - 1
+        ),
+        dim=len(target.shape) - 2
+    )
+
+    dist_joints = torch.mean(
+        torch.norm(
+            predicted - target,
+            dim=len(target.shape) - 1
+        ),
+        dim=len(target.shape) - 3
+    )
 
     def resolve_name(act_name):
-        # 1. Try space-based splitting (H3.6M style)
+
+        # Make sure action is a normal Python string
+        if isinstance(act_name, bytes):
+            act_name = act_name.decode("utf-8")
+
+        act_name = str(act_name)
+
+        # --------------------------------------------------------
+        # 1. Exact match
+        # --------------------------------------------------------
+
+        if act_name in action_error_sum:
+            return act_name
+
+        # --------------------------------------------------------
+        # 2. H36M style: "Walking 1", "Eating 2", etc.
+        # --------------------------------------------------------
+
         end_idx = act_name.find(' ')
+
         if end_idx != -1:
+
             candidate = act_name[:end_idx]
+
             if candidate in action_error_sum:
                 return candidate
-        # 2. Try progressive underscore splitting (AP3D style)
+
+        # --------------------------------------------------------
+        # 3. AP3D/custom style:
+        #    progressively remove underscore components
+        # --------------------------------------------------------
+
+        parts = act_name.split('_')
+
+        while len(parts) > 0:
+
+            candidate = '_'.join(parts)
+
+            if candidate in action_error_sum:
+                return candidate
+
+            parts = parts[:-1]
+
+        # --------------------------------------------------------
+        # 4. Custom dataset action
+        #
+        # Example:
+        #     default
+        #
+        # If it doesn't exist, create it.
+        # --------------------------------------------------------
+
         if act_name not in action_error_sum:
-            parts = act_name.split('_')
-            while len(parts) > 0:
-                candidate = '_'.join(parts)
-                if candidate in action_error_sum:
-                    return candidate
-                parts = parts[:-1]
+
+            action_error_sum[act_name] = {
+                'p1': AccumLoss(),
+                'p1_joints': AccumLoss(),
+                'p2': AccumLoss(),
+                'p2_joints': AccumLoss()
+            }
+
         return act_name
 
+
+    # ============================================================
+    # SINGLE ACTION IN BATCH
+    # ============================================================
+
     if len(set(list(action))) == 1:
+
         action_name = resolve_name(action[0])
+
         if valid_mask is not None:
+
             valid_num = sum(valid_mask)
+
             if valid_num > 0:
+
                 dist_masked = dist[valid_mask]
+
                 dist_joints_masked = dist_joints[valid_mask]
-                action_error_sum[action_name]['p1'].update(torch.mean(dist_masked).item() * valid_num, valid_num)
-                action_error_sum[action_name]['p1_joints'].update(torch.mean(dist_joints_masked, dim=0).cpu().numpy() * valid_num, valid_num)
+
+                action_error_sum[action_name]['p1'].update(
+                    torch.mean(dist_masked).item() * valid_num,
+                    valid_num
+                )
+
+                action_error_sum[action_name]['p1_joints'].update(
+                    torch.mean(
+                        dist_joints_masked,
+                        dim=0
+                    ).cpu().numpy() * valid_num,
+                    valid_num
+                )
+
         else:
-            action_error_sum[action_name]['p1'].update(torch.mean(dist).item() * num, num)
-            action_error_sum[action_name]['p1_joints'].update(torch.mean(dist_joints, dim=0).cpu().numpy() * num, num)
+
+            action_error_sum[action_name]['p1'].update(
+                torch.mean(dist).item() * num,
+                num
+            )
+
+            action_error_sum[action_name]['p1_joints'].update(
+                torch.mean(
+                    dist_joints,
+                    dim=0
+                ).cpu().numpy() * num,
+                num
+            )
+
+
+    # ============================================================
+    # MULTIPLE ACTIONS IN BATCH
+    # ============================================================
+
     else:
+
         for i in range(num):
+
             if valid_mask is not None and not valid_mask[i]:
                 continue
+
             action_name = resolve_name(action[i])
-            action_error_sum[action_name]['p1'].update(dist[i].item(), 1)
-            action_error_sum[action_name]['p1_joints'].update(dist_joints[i].cpu().numpy(), 1)
+
+            action_error_sum[action_name]['p1'].update(
+                dist[i].item(),
+                1
+            )
+
+            action_error_sum[action_name]['p1_joints'].update(
+                dist_joints[i].cpu().numpy(),
+                1
+            )
 
     return action_error_sum
-
+    
 def mpjpe_by_action_p2(predicted, target, action, action_error_sum, valid_mask=None):
     assert predicted.shape == target.shape
     num = predicted.size(0)
