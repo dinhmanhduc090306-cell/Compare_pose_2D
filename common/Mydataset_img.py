@@ -725,6 +725,7 @@ class ChunkedGenerator:
                 (
                     (pad_left, pad_right),
                     (0, 0),
+                    (0, 0),
                     (0, 0)
                 ),
                 mode="edge"
@@ -734,7 +735,6 @@ class ChunkedGenerator:
                 current_img,
                 (
                     (pad_left, pad_right),
-                    (0, 0),
                     (0, 0),
                     (0, 0)
                 ),
