@@ -221,13 +221,6 @@ def step(
                 image,
                 model
             )
-        if i == 0:
-            print("\n" + "=" * 70)
-            print("BATCH / MODEL SHAPES")
-            print("input_2D  :", input_2D.shape)
-            print("image     :", image.shape)
-            print("output_3D :", output_3D.shape)
-            print("=" * 70)
 
 
             # ================================================
@@ -243,8 +236,16 @@ def step(
 
             np.save(
                 f'output/predicted_poses_{subject[0]}_{action[0]}.npy',
-                output_3D.cpu().numpy()
+                output_3D.detach().cpu().numpy()
             )
+
+        if i == 0:
+            print("\n" + "=" * 70)
+            print("BATCH / MODEL SHAPES")
+            print("input_2D  :", input_2D.shape)
+            print("image     :", image.shape)
+            print("output_3D :", output_3D.shape)
+            print("=" * 70)
 
 
         # ====================================================
@@ -263,6 +264,21 @@ def step(
         # ====================================================
 
         if split == 'train':
+
+            if out_target.shape[1] == 1:
+                out_target = out_target.expand(
+                -1,
+                output_3D.shape[1],
+                -1,
+                -1
+                )
+
+            if out_target.shape != output_3D.shape:
+                raise ValueError(
+                f"Target/output shape mismatch: "
+                f"output={output_3D.shape}, "
+                f"target={out_target.shape}"
+                )
 
             if out_target.ndim != 4:
                     raise ValueError(
