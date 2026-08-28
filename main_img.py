@@ -617,10 +617,19 @@ def input_augmentation(
 ):
 
     input_2D_non_flip = input_2D[:, 0]
+    image_non_flip = image[:, 0]
+
+    print("\n" + "=" * 70)
+    print("INPUT AUGMENTATION")
+    print("input_2D original :", input_2D.shape)
+    print("image original    :", image.shape)
+    print("input_2D selected :", input_2D_non_flip.shape)
+    print("image selected    :", image_non_flip.shape)
+    print("=" * 70)
 
     output_3D_non_flip = model(
         input_2D_non_flip,
-        image
+        image_non_flip
     )
 
     return (
